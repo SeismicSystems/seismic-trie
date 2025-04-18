@@ -19,6 +19,8 @@ pub struct LeafNode {
     pub key: Nibbles,
     /// The node value.
     pub value: Vec<u8>,
+    /// Whether the node holds private state
+    pub is_private: bool,
 }
 
 impl fmt::Debug for LeafNode {
@@ -26,6 +28,7 @@ impl fmt::Debug for LeafNode {
         f.debug_struct("LeafNode")
             .field("key", &self.key)
             .field("value", &hex::encode(&self.value))
+            .field("is_private", &self.is_private)
             .finish()
     }
 }
@@ -50,34 +53,47 @@ impl Decodable for LeafNode {
             return Err(alloy_rlp::Error::Custom("leaf node key empty"));
         }
 
-        // Retrieve first byte. If it's [Some], then the nibbles are odd.
-        let first = match encoded_key[0] & 0xf0 {
-            Self::ODD_FLAG => Some(encoded_key[0] & 0x0f),
-            Self::EVEN_FLAG => None,
+        let key_flag = encoded_key[0] & 0xf0; // flags encoded in the first nibble
+
+        // Retrieve first byte.
+        // If it's [Some], then the nibbles are odd,
+        // also determines if the leaf is public or private state.
+        let (first, is_private) = match key_flag {
+            Self::PUB_EVEN_FLAG => (None, false),
+            Self::PRIV_EVEN_FLAG => (None, true),
+            Self::PUB_ODD_FLAG => (Some(encoded_key[0] & 0x0f), false),
+            Self::PRIV_ODD_FLAG => (Some(encoded_key[0] & 0x0f), true),
             _ => return Err(alloy_rlp::Error::Custom("node is not leaf")),
         };
 
         let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
         let value = Bytes::decode(&mut bytes)?.into();
-        Ok(Self { key, value })
+
+        Ok(Self { key, value, is_private })
     }
 }
 
 impl LeafNode {
-    /// The flag representing the even number of nibbles in the leaf key.
-    pub const EVEN_FLAG: u8 = 0x20;
+    /// The flag representing the even number of nibbles in the public leaf key.
+    pub const PUB_EVEN_FLAG: u8 = 0x20;
 
-    /// The flag representing the odd number of nibbles in the leaf key.
-    pub const ODD_FLAG: u8 = 0x30;
+    /// The flag representing the odd number of nibbles in the public leaf key.
+    pub const PUB_ODD_FLAG: u8 = 0x30;
+
+    /// The flag representing the even number of nibbles in the private leaf key.
+    pub const PRIV_EVEN_FLAG: u8 = 0x60;
+
+    /// The flag representing the odd number of nibbles in the private leaf key.
+    pub const PRIV_ODD_FLAG: u8 = 0x70;
 
     /// Creates a new leaf node with the given key and value.
-    pub const fn new(key: Nibbles, value: Vec<u8>) -> Self {
-        Self { key, value }
+    pub const fn new(key: Nibbles, value: Vec<u8>, is_private: bool) -> Self {
+        Self { key, value, is_private }
     }
 
     /// Return leaf node as [LeafNodeRef].
     pub fn as_ref(&self) -> LeafNodeRef<'_> {
-        LeafNodeRef { key: &self.key, value: &self.value }
+        LeafNodeRef { key: &self.key, value: &self.value, is_private: &self.is_private }
     }
 }
 
@@ -87,6 +103,8 @@ pub struct LeafNodeRef<'a> {
     pub key: &'a Nibbles,
     /// The node value.
     pub value: &'a [u8],
+    /// Whether the node holds private state
+    pub is_private: &'a bool,
 }
 
 impl fmt::Debug for LeafNodeRef<'_> {
@@ -103,7 +121,7 @@ impl Encodable for LeafNodeRef<'_> {
     #[inline]
     fn encode(&self, out: &mut dyn BufMut) {
         Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
-        encode_path_leaf(self.key, true).as_slice().encode(out);
+        encode_path_leaf(self.key, true, self.is_private()).as_slice().encode(out);
         self.value.encode(out);
     }
 
@@ -116,8 +134,13 @@ impl Encodable for LeafNodeRef<'_> {
 
 impl<'a> LeafNodeRef<'a> {
     /// Creates a new leaf node with the given key and value.
-    pub const fn new(key: &'a Nibbles, value: &'a [u8]) -> Self {
-        Self { key, value }
+    pub const fn new(key: &'a Nibbles, value: &'a [u8], is_private: &'a bool) -> Self {
+        Self { key, value, is_private }
+    }
+
+    /// Whether the node holds private state
+    pub fn is_private(&self) -> bool {
+        *self.is_private
     }
 
     /// RLP-encodes the node and returns either `rlp(node)` or `rlp(keccak(rlp(node)))`.
@@ -147,15 +170,37 @@ mod tests {
     #[test]
     fn encode_leaf_node_nibble() {
         let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
-        let encoded = encode_path_leaf(&nibbles, true);
+        let encoded = encode_path_leaf(&nibbles, true, false);
         assert_eq!(encoded[..], hex!("20646f"));
+    }
+
+    #[test]
+    fn priv_leaf_node_encode_decode() {
+        // public case
+        let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        let mut leaf_node = LeafNode::new(nibbles.clone(), vec![1, 2, 3], false);
+        let mut out = vec![];
+        LeafNode::encode(&leaf_node, &mut out);
+        let decoded = LeafNode::decode(&mut &out[..]).unwrap();
+        assert_eq!(decoded.is_private, leaf_node.is_private);
+        assert_eq!(nibbles, decoded.key);
+        assert_eq!(vec![1, 2, 3], decoded.value);
+
+        // private case
+        out = vec![];
+        leaf_node.is_private = true;
+        LeafNode::encode(&leaf_node, &mut out);
+        let decoded = LeafNode::decode(&mut &out[..]).unwrap();
+        assert_eq!(decoded.is_private, leaf_node.is_private);
+        assert_eq!(nibbles, decoded.key);
+        assert_eq!(vec![1, 2, 3], decoded.value);
     }
 
     #[test]
     fn rlp_leaf_node_roundtrip() {
         let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
         let val = hex!("76657262");
-        let leaf = LeafNode::new(nibble, val.to_vec());
+        let leaf = LeafNode::new(nibble, val.to_vec(), false);
         let rlp = leaf.as_ref().rlp(&mut vec![]);
         assert_eq!(rlp.as_ref(), hex!("c98320646f8476657262"));
         assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), leaf);

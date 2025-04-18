@@ -335,9 +335,16 @@ mod tests {
         let encoded = alloy_rlp::encode(&sparse_node);
         assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), sparse_node);
 
-        let leaf_child = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec());
+        let leaf_child = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec(), false);
         let mut buf = vec![];
         let leaf_rlp = leaf_child.as_ref().rlp(&mut buf);
+        let branch_with_leaf = BranchNode::new(vec![leaf_rlp.clone()], TrieMask::new(0b0010));
+        let encoded = alloy_rlp::encode(&branch_with_leaf);
+        assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_leaf);
+
+        let leaf_child_private = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec(), true);
+        let mut buf = vec![];
+        let leaf_rlp = leaf_child_private.as_ref().rlp(&mut buf);
         let branch_with_leaf = BranchNode::new(vec![leaf_rlp.clone()], TrieMask::new(0b0010));
         let encoded = alloy_rlp::encode(&branch_with_leaf);
         assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_leaf);

@@ -37,7 +37,7 @@ use-self = "warn"
 redundant-clone = "warn"
 
 [dependencies]
-alloy-primitives = { version = "0.8.14", default-features = false, features = [
+alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "fac24f18", default-features = false, features = [
     "rlp",
     "map",
 ] }
