@@ -37,7 +37,7 @@ use-self = "warn"
 redundant-clone = "warn"
 
 [dependencies]
-alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "fac24f18", default-features = false, features = [
+alloy-primitives = { version = "0.8.14", default-features = false, features = [
     "rlp",
     "map",
 ] }
@@ -109,3 +109,6 @@ ethereum = []
 name = "bench"
 harness = false
 required-features = ["arbitrary"]
+
+[patch.crates-io]
+alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "5dc07cc" }
