@@ -293,6 +293,16 @@ mod tests {
         assert_eq!(rlp[..], hex!("c98320646f8476657262"));
         assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), leaf);
 
+        // private leaf
+        let priv_leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+            hex!("76657262").to_vec(),
+            true,
+        ));
+        let rlp = priv_leaf.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("c98360646f8476657262"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), priv_leaf);
+
         // extension
         let mut child = vec![];
         hex!("76657262").to_vec().as_slice().encode(&mut child);
@@ -325,14 +335,6 @@ mod tests {
         let path = encode_path_leaf(&nibbles, true, false);
         let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
         assert_eq!(path[..], expected);
-    }
-
-    #[test]
-    fn encode_leaf_node_uses_private_flag() {
-        let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
-        let encoded_pub = encode_path_leaf(&nibbles, true, false);
-        let encoded_priv = encode_path_leaf(&nibbles, true, true);
-        assert_ne!(encoded_pub[..], encoded_priv[..]);
     }
 
     #[test]

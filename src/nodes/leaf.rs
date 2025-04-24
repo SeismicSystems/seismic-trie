@@ -198,11 +198,21 @@ mod tests {
 
     #[test]
     fn rlp_leaf_node_roundtrip() {
+        // Public leaf node
         let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
         let val = hex!("76657262");
-        let leaf = LeafNode::new(nibble, val.to_vec(), false);
+        
+        let leaf = LeafNode::new(nibble.clone(), val.to_vec(), false);
         let rlp = leaf.as_ref().rlp(&mut vec![]);
         assert_eq!(rlp.as_ref(), hex!("c98320646f8476657262"));
         assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), leaf);
+        
+        // Private leaf node
+        let priv_leaf = LeafNode::new(nibble, val.to_vec(), true);
+        let rlp = priv_leaf.as_ref().rlp(&mut vec![]);
+        assert_eq!(rlp.as_ref(), hex!("c98360646f8476657262"));
+        assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), priv_leaf);
+
+        assert_ne!(leaf.as_ref().rlp(&mut vec![]), priv_leaf.as_ref().rlp(&mut vec![]));
     }
 }
