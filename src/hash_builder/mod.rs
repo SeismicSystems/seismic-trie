@@ -167,7 +167,12 @@ impl HashBuilder {
     }
 
     #[inline]
-    fn set_key_value(&mut self, key: Nibbles, value: HashBuilderValueRef<'_>, is_private: Option<bool>) {
+    fn set_key_value(
+        &mut self,
+        key: Nibbles,
+        value: HashBuilderValueRef<'_>,
+        is_private: Option<bool>,
+    ) {
         self.log_key_value("old value");
         self.key = key;
         self.value.set_from_ref(value);
@@ -556,9 +561,7 @@ mod tests {
 
     #[test]
     fn test_root_rlp_hashed_data() {
-        let mut data = [
-            (B256::with_last_byte(1), U256::from(2)),
-        ];
+        let mut data = [(B256::with_last_byte(1), U256::from(2))];
         data.sort();
 
         let mut hb = HashBuilder::default();
@@ -603,8 +606,16 @@ mod tests {
         // Manually create the branch node that should be there after the first 2 leaves are added.
         // Skip the 0th element given in this example they have a common prefix and will
         // collapse to a Branch node.
-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), is_private);
-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), is_private);
+        let leaf1 = LeafNode::new(
+            Nibbles::unpack(&raw_input[0].0[1..]),
+            raw_input[0].1.clone(),
+            is_private,
+        );
+        let leaf2 = LeafNode::new(
+            Nibbles::unpack(&raw_input[1].0[1..]),
+            raw_input[1].1.clone(),
+            is_private,
+        );
         let mut branch: [&dyn Encodable; 17] = [b""; 17];
         // We set this to `4` and `7` because that matches the 2nd element of the corresponding
         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
@@ -641,8 +652,16 @@ mod tests {
         // Manually create the branch node that should be there after the first 2 leaves are added.
         // Skip the 0th element given in this example they have a common prefix and will
         // collapse to a Branch node.
-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), is_private);
-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), is_private);
+        let leaf1 = LeafNode::new(
+            Nibbles::unpack(&raw_input[0].0[1..]),
+            raw_input[0].1.clone(),
+            is_private,
+        );
+        let leaf2 = LeafNode::new(
+            Nibbles::unpack(&raw_input[1].0[1..]),
+            raw_input[1].1.clone(),
+            is_private,
+        );
         let mut branch: [&dyn Encodable; 17] = [b""; 17];
         // We set this to `4` and `7` because that matches the 2nd element of the corresponding
         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
@@ -683,9 +702,7 @@ mod tests {
 
     #[test]
     fn test_root_rlp_hashed_prv_leaves() {
-        let mut data = [
-            (B256::with_last_byte(1), U256::from(2)),
-        ];
+        let mut data = [(B256::with_last_byte(1), U256::from(2))];
         data.sort();
 
         let mut hb_pub = HashBuilder::default();
@@ -703,9 +720,9 @@ mod tests {
     fn test_mixed_public_private_leaves() {
         let mut data = [
             (hex!("646f").to_vec(), hex!("76657262").to_vec(), false), // public
-            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec(), true),  // private
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec(), true), // private
             (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec(), false), // public
-            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec(), true),  // private
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec(), true), // private
         ];
         data.sort();
 
@@ -714,7 +731,7 @@ mod tests {
             hb.add_leaf(Nibbles::unpack(key), val.as_slice(), *is_private);
         });
         let root = hb.root();
-        
+
         // Verify the root is different from both all-public and all-private versions
         let mut hb_all_pub = HashBuilder::default();
         let mut hb_all_priv = HashBuilder::default();

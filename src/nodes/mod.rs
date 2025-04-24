@@ -111,7 +111,9 @@ impl Decodable for TrieNode {
                     LeafNode::PRIV_ODD_FLAG => (Some(encoded_key[0] & 0x0f), Some(true)),
                     ExtensionNode::ODD_FLAG => (Some(encoded_key[0] & 0x0f), None),
                     ExtensionNode::EVEN_FLAG => (None, None),
-                    _ => return Err(alloy_rlp::Error::Custom("node is not leaf or extension node")),
+                    _ => {
+                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"))
+                    }
                 };
 
                 let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
