@@ -697,4 +697,31 @@ mod tests {
 
         assert_ne!(hb_pub.root(), hb_priv.root());
     }
+
+    #[test]
+    fn test_mixed_public_private_leaves() {
+        let mut data = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec(), false), // public
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec(), true),  // private
+            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec(), false), // public
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec(), true),  // private
+        ];
+        data.sort();
+
+        let mut hb = HashBuilder::default();
+        data.iter().for_each(|(key, val, is_private)| {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), *is_private);
+        });
+        let root = hb.root();
+        
+        // Verify the root is different from both all-public and all-private versions
+        let mut hb_all_pub = HashBuilder::default();
+        let mut hb_all_priv = HashBuilder::default();
+        data.iter().for_each(|(key, val, _)| {
+            hb_all_pub.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+            hb_all_priv.add_leaf(Nibbles::unpack(key), val.as_slice(), true);
+        });
+        assert_ne!(root, hb_all_pub.root());
+        assert_ne!(root, hb_all_priv.root());
+    }
 }

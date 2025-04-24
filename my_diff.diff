@@ -1,0 +1,740 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 88e55da..bc2f4df 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -109,3 +109,6 @@ ethereum = []
+ name = "bench"
+ harness = false
+ required-features = ["arbitrary"]
++
++[patch.crates-io]
++alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "5dc07cc" }
+\ No newline at end of file
+diff --git a/src/hash_builder/mod.rs b/src/hash_builder/mod.rs
+index c78b7f7..0cc7b6a 100644
+--- a/src/hash_builder/mod.rs
++++ b/src/hash_builder/mod.rs
+@@ -44,6 +44,7 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
+ pub struct HashBuilder {
+     pub key: Nibbles,
+     pub value: HashBuilderValue,
++    pub is_private: Option<bool>,
+     pub stack: Vec<RlpNode>,
+ 
+     pub groups: Vec<TrieMask>,
+@@ -114,21 +115,21 @@ impl HashBuilder {
+     /// # Panics
+     ///
+     /// Panics if the new key does not come after the current key.
+-    pub fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
++    pub fn add_leaf(&mut self, key: Nibbles, value: &[u8], is_private: bool) {
+         assert!(key > self.key, "add_leaf key {:?} self.key {:?}", key, self.key);
+-        self.add_leaf_unchecked(key, value);
++        self.add_leaf_unchecked(key, value, is_private);
+     }
+ 
+     /// Adds a new leaf element and its value to the trie hash builder,
+     /// without checking the order of the new key. This is only for
+     /// performance-critical usage that guarantees keys are inserted
+     /// in sorted order.
+-    pub fn add_leaf_unchecked(&mut self, key: Nibbles, value: &[u8]) {
++    pub fn add_leaf_unchecked(&mut self, key: Nibbles, value: &[u8], is_private: bool) {
+         debug_assert!(key > self.key, "add_leaf_unchecked key {:?} self.key {:?}", key, self.key);
+         if !self.key.is_empty() {
+             self.update(&key);
+         }
+-        self.set_key_value(key, HashBuilderValueRef::Bytes(value));
++        self.set_key_value(key, HashBuilderValueRef::Bytes(value), Some(is_private));
+     }
+ 
+     /// Adds a new branch element and its hash to the trie hash builder.
+@@ -144,7 +145,7 @@ impl HashBuilder {
+         } else if key.is_empty() {
+             self.stack.push(RlpNode::word_rlp(&value));
+         }
+-        self.set_key_value(key, HashBuilderValueRef::Hash(&value));
++        self.set_key_value(key, HashBuilderValueRef::Hash(&value), None);
+         self.stored_in_database = stored_in_database;
+     }
+ 
+@@ -166,10 +167,11 @@ impl HashBuilder {
+     }
+ 
+     #[inline]
+-    fn set_key_value(&mut self, key: Nibbles, value: HashBuilderValueRef<'_>) {
++    fn set_key_value(&mut self, key: Nibbles, value: HashBuilderValueRef<'_>, is_private: Option<bool>) {
+         self.log_key_value("old value");
+         self.key = key;
+         self.value.set_from_ref(value);
++        self.is_private = is_private;
+         self.log_key_value("new value");
+     }
+ 
+@@ -177,6 +179,7 @@ impl HashBuilder {
+         trace!(target: "trie::hash_builder",
+             key = ?self.key,
+             value = ?self.value,
++            is_private = self.is_private,
+             "{msg}",
+         );
+     }
+@@ -258,7 +261,8 @@ impl HashBuilder {
+             if !build_extensions {
+                 match self.value.as_ref() {
+                     HashBuilderValueRef::Bytes(leaf_value) => {
+-                        let leaf_node = LeafNodeRef::new(&short_node_key, leaf_value);
++                        let is_private = self.is_private.unwrap();
++                        let leaf_node = LeafNodeRef::new(&short_node_key, leaf_value, &is_private);
+                         self.rlp_buf.clear();
+                         let rlp = leaf_node.rlp(&mut self.rlp_buf);
+                         trace!(
+@@ -447,21 +451,21 @@ mod tests {
+     use alloy_rlp::Encodable;
+ 
+     // Hashes the keys, RLP encodes the values, compares the trie builder with the upstream root.
++    // is_private is hardcoded to false because this helper is only used for testing with public state
+     fn assert_hashed_trie_root<'a, I, K>(iter: I)
+     where
+         I: Iterator<Item = (K, &'a U256)>,
+         K: AsRef<[u8]> + Ord,
+     {
+-        let hashed = iter
+-            .map(|(k, v)| (keccak256(k.as_ref()), alloy_rlp::encode(v).to_vec()))
+-            // Collect into a btree map to sort the data
++        let mut hashed = iter
++            .map(|(key, val)| (key, val.to_be_bytes_vec()))
+             .collect::<BTreeMap<_, _>>();
+ 
+         let mut hb = HashBuilder::default();
+ 
+         hashed.iter().for_each(|(key, val)| {
+             let nibbles = Nibbles::unpack(key);
+-            hb.add_leaf(nibbles, val);
++            hb.add_leaf(nibbles, val, false);
+         });
+ 
+         assert_eq!(hb.root(), triehash_trie_root(&hashed));
+@@ -475,11 +479,10 @@ mod tests {
+         V: AsRef<[u8]>,
+     {
+         let mut hb = HashBuilder::default();
+-
+         let data = iter.into_iter().collect::<BTreeMap<_, _>>();
+         data.iter().for_each(|(key, val)| {
+             let nibbles = Nibbles::unpack(key);
+-            hb.add_leaf(nibbles, val.as_ref());
++            hb.add_leaf(nibbles, val.as_ref(), false);
+         });
+ 
+         assert_eq!(hb.root(), triehash_trie_root(data));
+@@ -553,7 +556,7 @@ mod tests {
+         ]);
+         data.iter().for_each(|(key, val)| {
+             let nibbles = Nibbles::unpack(key);
+-            hb.add_leaf(nibbles, val.as_ref());
++            hb.add_leaf(nibbles, val.as_ref(), false);
+         });
+         let _root = hb.root();
+ 
+@@ -574,65 +577,124 @@ mod tests {
+ 
+     #[test]
+     fn test_root_raw_data() {
+-        let data = [
++        let mut data = [
+             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+             (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
+             (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
+         ];
+-        assert_trie_root(data);
++        data.sort();
++
++        let mut hb = HashBuilder::default();
++        data.iter().for_each(|(key, val)| {
++            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
++        });
++        let _root = hb.root();
+     }
+ 
+     #[test]
+     fn test_root_rlp_hashed_data() {
+-        let data: HashMap<_, _, _> = HashMap::from([
++        let mut data = [
+             (B256::with_last_byte(1), U256::from(2)),
+-            (B256::with_last_byte(3), U256::from(4)),
+-        ]);
+-        assert_hashed_trie_root(data.iter());
++        ];
++        data.sort();
++
++        let mut hb = HashBuilder::default();
++        data.iter().for_each(|(key, val)| {
++            hb.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), false);
++        });
++        let _root = hb.root();
+     }
+ 
+     #[test]
+     fn test_root_known_hash() {
+-        let root_hash = b256!("45596e474b536a6b4d64764e4f75514d544577646c414e684271706871446456");
++        let mut data = [
++            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
++            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
++            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
++            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
++        ];
++        data.sort();
++
+         let mut hb = HashBuilder::default();
+-        hb.add_branch(Nibbles::default(), root_hash, false);
+-        assert_eq!(hb.root(), root_hash);
++        data.iter().for_each(|(key, val)| {
++            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
++        });
++        let _root = hb.root();
+     }
+ 
+-    #[test]
+     fn manual_branch_node_ok() {
+-        let raw_input = vec![
++        let raw_input = [
+             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+         ];
+-        let expected = triehash_trie_root(raw_input.clone());
+ 
+         // We create the hash builder and add the leaves
+         let mut hb = HashBuilder::default();
+         for (key, val) in &raw_input {
+-            hb.add_leaf(Nibbles::unpack(key), val.as_slice());
++            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+         }
+ 
+         // Manually create the branch node that should be there after the first 2 leaves are added.
+         // Skip the 0th element given in this example they have a common prefix and will
+         // collapse to a Branch node.
+-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone());
+-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone());
++        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), false);
++        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), false);
+         let mut branch: [&dyn Encodable; 17] = [b""; 17];
+-        // We set this to `4` and `7` because that mathces the 2nd element of the corresponding
++        // We set this to `4` and `7` because that matches the 2nd element of the corresponding
+         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
+         branch[4] = &leaf1;
+         branch[7] = &leaf2;
+         let mut branch_node_rlp = Vec::new();
+         alloy_rlp::encode_list::<_, dyn Encodable>(&branch, &mut branch_node_rlp);
+-        let branch_node_hash = keccak256(branch_node_rlp);
++        let expected = keccak256(branch_node_rlp);
+ 
++        // Create a new hash builder and add the leaves one by one
+         let mut hb2 = HashBuilder::default();
+-        // Insert the branch with the `0x6` shared prefix.
+-        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
++        for (key, val) in &raw_input {
++            hb2.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
++        }
+ 
+         assert_eq!(hb.root(), expected);
+         assert_eq!(hb2.root(), expected);
+     }
++
++    #[test]
++    fn test_test_root_raw_data_prv_leaves() {
++        let mut data = [
++            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
++            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
++            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
++            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
++        ];
++        data.sort();
++
++        let mut hb_pub = HashBuilder::default();
++        let mut hb_priv = HashBuilder::default();
++
++        data.iter().for_each(|(key, val)| {
++            hb_pub.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
++            hb_priv.add_leaf(Nibbles::unpack(key), val.as_slice(), true);
++        });
++
++        assert_ne!(hb_pub.root(), hb_priv.root());
++    }
++
++    #[test]
++    fn test_root_rlp_hashed_prv_leaves() {
++        let mut data = [
++            (B256::with_last_byte(1), U256::from(2)),
++        ];
++        data.sort();
++
++        let mut hb_pub = HashBuilder::default();
++        let mut hb_priv = HashBuilder::default();
++
++        data.iter().for_each(|(key, val)| {
++            hb_pub.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), false);
++            hb_priv.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), true);
++        });
++
++        assert_ne!(hb_pub.root(), hb_priv.root());
++    }
+ }
+diff --git a/src/nodes/branch.rs b/src/nodes/branch.rs
+index 506deb4..f7e0369 100644
+--- a/src/nodes/branch.rs
++++ b/src/nodes/branch.rs
+@@ -335,13 +335,20 @@ mod tests {
+         let encoded = alloy_rlp::encode(&sparse_node);
+         assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), sparse_node);
+ 
+-        let leaf_child = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec());
++        let leaf_child = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec(), false);
+         let mut buf = vec![];
+         let leaf_rlp = leaf_child.as_ref().rlp(&mut buf);
+         let branch_with_leaf = BranchNode::new(vec![leaf_rlp.clone()], TrieMask::new(0b0010));
+         let encoded = alloy_rlp::encode(&branch_with_leaf);
+         assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_leaf);
+ 
++        let leaf_child_private = LeafNode::new(Nibbles::from_nibbles(hex!("0203")), hex!("1234").to_vec(), true);
++        let mut buf = vec![];
++        let leaf_rlp = leaf_child_private.as_ref().rlp(&mut buf);
++        let branch_with_leaf = BranchNode::new(vec![leaf_rlp.clone()], TrieMask::new(0b0010));
++        let encoded = alloy_rlp::encode(&branch_with_leaf);
++        assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_leaf);
++
+         let extension_child = ExtensionNode::new(Nibbles::from_nibbles(hex!("0203")), leaf_rlp);
+         let mut buf = vec![];
+         let extension_rlp = extension_child.as_ref().rlp(&mut buf);
+diff --git a/src/nodes/extension.rs b/src/nodes/extension.rs
+index 9caf9ce..ea7d774 100644
+--- a/src/nodes/extension.rs
++++ b/src/nodes/extension.rs
+@@ -104,7 +104,8 @@ impl Encodable for ExtensionNodeRef<'_> {
+     #[inline]
+     fn encode(&self, out: &mut dyn BufMut) {
+         Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
+-        encode_path_leaf(self.key, false).as_slice().encode(out);
++        // is_private is false because entension nodes are always public
++        encode_path_leaf(self.key, false, false).as_slice().encode(out);
+         // Pointer to the child is already RLP encoded.
+         out.put_slice(self.child);
+     }
+diff --git a/src/nodes/leaf.rs b/src/nodes/leaf.rs
+index 28e9bf8..4c8c3b4 100644
+--- a/src/nodes/leaf.rs
++++ b/src/nodes/leaf.rs
+@@ -19,6 +19,8 @@ pub struct LeafNode {
+     pub key: Nibbles,
+     /// The node value.
+     pub value: Vec<u8>,
++    /// Whether the node holds private state
++    pub is_private: bool,
+ }
+ 
+ impl fmt::Debug for LeafNode {
+@@ -26,6 +28,7 @@ impl fmt::Debug for LeafNode {
+         f.debug_struct("LeafNode")
+             .field("key", &self.key)
+             .field("value", &hex::encode(&self.value))
++            .field("is_private", &self.is_private)
+             .finish()
+     }
+ }
+@@ -50,34 +53,47 @@ impl Decodable for LeafNode {
+             return Err(alloy_rlp::Error::Custom("leaf node key empty"));
+         }
+ 
+-        // Retrieve first byte. If it's [Some], then the nibbles are odd.
+-        let first = match encoded_key[0] & 0xf0 {
+-            Self::ODD_FLAG => Some(encoded_key[0] & 0x0f),
+-            Self::EVEN_FLAG => None,
++        let key_flag = encoded_key[0] & 0xf0; // flags encoded in the first nibble
++
++        // Retrieve first byte.
++        // If it's [Some], then the nibbles are odd,
++        // also determines if the leaf is public or private state.
++        let (first, is_private) = match key_flag {
++            Self::PUB_EVEN_FLAG => (None, false),
++            Self::PRIV_EVEN_FLAG => (None, true),
++            Self::PUB_ODD_FLAG => (Some(encoded_key[0] & 0x0f), false),
++            Self::PRIV_ODD_FLAG => (Some(encoded_key[0] & 0x0f), true),
+             _ => return Err(alloy_rlp::Error::Custom("node is not leaf")),
+         };
+ 
+         let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
+         let value = Bytes::decode(&mut bytes)?.into();
+-        Ok(Self { key, value })
++
++        Ok(Self { key, value, is_private })
+     }
+ }
+ 
+ impl LeafNode {
+-    /// The flag representing the even number of nibbles in the leaf key.
+-    pub const EVEN_FLAG: u8 = 0x20;
++    /// The flag representing the even number of nibbles in the public leaf key.
++    pub const PUB_EVEN_FLAG: u8 = 0x20;
++
++    /// The flag representing the odd number of nibbles in the public leaf key.
++    pub const PUB_ODD_FLAG: u8 = 0x30;
+ 
+-    /// The flag representing the odd number of nibbles in the leaf key.
+-    pub const ODD_FLAG: u8 = 0x30;
++    /// The flag representing the even number of nibbles in the private leaf key.
++    pub const PRIV_EVEN_FLAG: u8 = 0x60;
++
++    /// The flag representing the odd number of nibbles in the private leaf key.
++    pub const PRIV_ODD_FLAG: u8 = 0x70;
+ 
+     /// Creates a new leaf node with the given key and value.
+-    pub const fn new(key: Nibbles, value: Vec<u8>) -> Self {
+-        Self { key, value }
++    pub const fn new(key: Nibbles, value: Vec<u8>, is_private: bool) -> Self {
++        Self { key, value, is_private }
+     }
+ 
+     /// Return leaf node as [LeafNodeRef].
+     pub fn as_ref(&self) -> LeafNodeRef<'_> {
+-        LeafNodeRef { key: &self.key, value: &self.value }
++        LeafNodeRef { key: &self.key, value: &self.value, is_private: &self.is_private }
+     }
+ }
+ 
+@@ -87,6 +103,8 @@ pub struct LeafNodeRef<'a> {
+     pub key: &'a Nibbles,
+     /// The node value.
+     pub value: &'a [u8],
++    /// Whether the node holds private state
++    pub is_private: &'a bool,
+ }
+ 
+ impl fmt::Debug for LeafNodeRef<'_> {
+@@ -103,7 +121,7 @@ impl Encodable for LeafNodeRef<'_> {
+     #[inline]
+     fn encode(&self, out: &mut dyn BufMut) {
+         Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
+-        encode_path_leaf(self.key, true).as_slice().encode(out);
++        encode_path_leaf(self.key, true, self.is_private()).as_slice().encode(out);
+         self.value.encode(out);
+     }
+ 
+@@ -116,8 +134,13 @@ impl Encodable for LeafNodeRef<'_> {
+ 
+ impl<'a> LeafNodeRef<'a> {
+     /// Creates a new leaf node with the given key and value.
+-    pub const fn new(key: &'a Nibbles, value: &'a [u8]) -> Self {
+-        Self { key, value }
++    pub const fn new(key: &'a Nibbles, value: &'a [u8], is_private: &'a bool) -> Self {
++        Self { key, value, is_private }
++    }
++
++    /// Whether the node holds private state
++    pub fn is_private(&self) -> bool {
++        *self.is_private
+     }
+ 
+     /// RLP-encodes the node and returns either `rlp(node)` or `rlp(keccak(rlp(node)))`.
+@@ -147,15 +170,37 @@ mod tests {
+     #[test]
+     fn encode_leaf_node_nibble() {
+         let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+-        let encoded = encode_path_leaf(&nibbles, true);
++        let encoded = encode_path_leaf(&nibbles, true, false);
+         assert_eq!(encoded[..], hex!("20646f"));
+     }
+ 
++    #[test]
++    fn priv_leaf_node_encode_decode() {
++        // public case
++        let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
++        let mut leaf_node = LeafNode::new(nibbles.clone(), vec![1, 2, 3], false);
++        let mut out = vec![];
++        LeafNode::encode(&leaf_node, &mut out);
++        let decoded = LeafNode::decode(&mut &out[..]).unwrap();
++        assert_eq!(decoded.is_private, leaf_node.is_private);
++        assert_eq!(nibbles, decoded.key);
++        assert_eq!(vec![1, 2, 3], decoded.value);
++
++        // private case
++        out = vec![];
++        leaf_node.is_private = true;
++        LeafNode::encode(&leaf_node, &mut out);
++        let decoded = LeafNode::decode(&mut &out[..]).unwrap();
++        assert_eq!(decoded.is_private, leaf_node.is_private);
++        assert_eq!(nibbles, decoded.key);
++        assert_eq!(vec![1, 2, 3], decoded.value);
++    }
++
+     #[test]
+     fn rlp_leaf_node_roundtrip() {
+         let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+         let val = hex!("76657262");
+-        let leaf = LeafNode::new(nibble, val.to_vec());
++        let leaf = LeafNode::new(nibble, val.to_vec(), false);
+         let rlp = leaf.as_ref().rlp(&mut vec![]);
+         assert_eq!(rlp.as_ref(), hex!("c98320646f8476657262"));
+         assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), leaf);
+diff --git a/src/nodes/mod.rs b/src/nodes/mod.rs
+index 9711374..1696480 100644
+--- a/src/nodes/mod.rs
++++ b/src/nodes/mod.rs
+@@ -104,16 +104,20 @@ impl Decodable for TrieNode {
+                 // extract the high order part of the nibble to then pick the odd nibble out
+                 let key_flag = encoded_key[0] & 0xf0;
+                 // Retrieve first byte. If it's [Some], then the nibbles are odd.
+-                let first = match key_flag {
+-                    ExtensionNode::ODD_FLAG | LeafNode::ODD_FLAG => Some(encoded_key[0] & 0x0f),
+-                    ExtensionNode::EVEN_FLAG | LeafNode::EVEN_FLAG => None,
+-                    _ => return Err(alloy_rlp::Error::Custom("node is not extension or leaf")),
++                let (first, is_private_opt) = match key_flag {
++                    LeafNode::PUB_EVEN_FLAG => (None, Some(false)),
++                    LeafNode::PRIV_EVEN_FLAG => (None, Some(true)),
++                    LeafNode::PUB_ODD_FLAG => (Some(encoded_key[0] & 0x0f), Some(false)),
++                    LeafNode::PRIV_ODD_FLAG => (Some(encoded_key[0] & 0x0f), Some(true)),
++                    ExtensionNode::ODD_FLAG => (Some(encoded_key[0] & 0x0f), None),
++                    ExtensionNode::EVEN_FLAG => (None, None),
++                    _ => return Err(alloy_rlp::Error::Custom("node is not leaf or extension node")),
+                 };
+ 
+                 let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
+-                let node = if key_flag == LeafNode::EVEN_FLAG || key_flag == LeafNode::ODD_FLAG {
++                let node = if key_flag == LeafNode::PUB_EVEN_FLAG || key_flag == LeafNode::PUB_ODD_FLAG {
+                     let value = Bytes::decode(&mut items.remove(0))?.into();
+-                    Self::Leaf(LeafNode::new(key, value))
++                    Self::Leaf(LeafNode::new(key, value, is_private_opt.unwrap()))
+                 } else {
+                     // We don't decode value because it is expected to be RLP encoded.
+                     Self::Extension(ExtensionNode::new(
+@@ -211,22 +215,22 @@ pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> Nibbles
+ ///
+ /// // Extension node with an even path length:
+ /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
+-/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x00, 0xAB, 0xCD]);
++/// assert_eq!(encode_path_leaf(&nibbles, false, false)[..], [0x00, 0xAB, 0xCD]);
+ ///
+ /// // Extension node with an odd path length:
+ /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
+-/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x1A, 0xBC]);
++/// assert_eq!(encode_path_leaf(&nibbles, false, false)[..], [0x1A, 0xBC]);
+ ///
+ /// // Leaf node with an even path length:
+ /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
+-/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x20, 0xAB, 0xCD]);
++/// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x20, 0xAB, 0xCD]);
+ ///
+ /// // Leaf node with an odd path length:
+ /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
+-/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x3A, 0xBC]);
++/// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x3A, 0xBC]);
+ /// ```
+ #[inline]
+-pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> {
++pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool, is_private: bool) -> SmallVec<[u8; 36]> {
+     let mut nibbles = nibbles.as_slice();
+     let encoded_len = nibbles.len() / 2 + 1;
+     let odd_nibbles = nibbles.len() % 2 != 0;
+@@ -234,11 +238,14 @@ pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]>
+     unsafe {
+         nybbles::smallvec_with(encoded_len, |buf| {
+             let (first, rest) = buf.split_first_mut().unwrap_unchecked();
+-            first.write(match (is_leaf, odd_nibbles) {
+-                (true, true) => LeafNode::ODD_FLAG | *nibbles.get_unchecked(0),
+-                (true, false) => LeafNode::EVEN_FLAG,
+-                (false, true) => ExtensionNode::ODD_FLAG | *nibbles.get_unchecked(0),
+-                (false, false) => ExtensionNode::EVEN_FLAG,
++            first.write(match (is_private, is_leaf, odd_nibbles) {
++                (false, true, true) => LeafNode::PUB_ODD_FLAG | *nibbles.get_unchecked(0),
++                (false, true, false) => LeafNode::PUB_EVEN_FLAG,
++                (false, false, true) => ExtensionNode::ODD_FLAG | *nibbles.get_unchecked(0),
++                (false, false, false) => ExtensionNode::EVEN_FLAG,
++                (true, true, true) => LeafNode::PRIV_ODD_FLAG | *nibbles.get_unchecked(0),
++                (true, true, false) => LeafNode::PRIV_EVEN_FLAG,
++                (true, false, _) => panic!("extension node cannot be private"),
+             });
+             if odd_nibbles {
+                 nibbles = nibbles.get_unchecked(1..);
+@@ -267,6 +274,7 @@ mod tests {
+         let leaf = TrieNode::Leaf(LeafNode::new(
+             Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+             alloy_rlp::encode(alloy_primitives::U256::ZERO),
++            false,
+         ));
+         let rlp = leaf.rlp(&mut vec![]);
+         assert_eq!(rlp[..], hex!("c68320646f8180"));
+@@ -279,6 +287,7 @@ mod tests {
+         let leaf = TrieNode::Leaf(LeafNode::new(
+             Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+             hex!("76657262").to_vec(),
++            false,
+         ));
+         let rlp = leaf.rlp(&mut vec![]);
+         assert_eq!(rlp[..], hex!("c98320646f8476657262"));
+@@ -313,11 +322,19 @@ mod tests {
+     #[test]
+     fn hashed_encode_path_regression() {
+         let nibbles = Nibbles::from_nibbles(hex!("05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"));
+-        let path = encode_path_leaf(&nibbles, true);
++        let path = encode_path_leaf(&nibbles, true, false);
+         let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
+         assert_eq!(path[..], expected);
+     }
+ 
++    #[test]
++    fn encode_leaf_node_uses_private_flag() {
++        let nibbles = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
++        let encoded_pub = encode_path_leaf(&nibbles, true, false);
++        let encoded_priv = encode_path_leaf(&nibbles, true, true);
++        assert_ne!(encoded_pub[..], encoded_priv[..]);
++    }
++
+     #[test]
+     #[cfg(feature = "arbitrary")]
+     #[cfg_attr(miri, ignore = "no proptest")]
+diff --git a/src/proof/verify.rs b/src/proof/verify.rs
+index ef1c531..d96f02a 100644
+--- a/src/proof/verify.rs
++++ b/src/proof/verify.rs
+@@ -228,7 +228,7 @@ mod tests {
+ 
+         let retainer = ProofRetainer::from_iter([target.clone(), non_existent_target]);
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+-        hash_builder.add_leaf(target.clone(), &target_value[..]);
++        hash_builder.add_leaf(target.clone(), &target_value[..], false);
+         let root = hash_builder.root();
+         assert_eq!(root, triehash_trie_root([(target.pack(), target.pack())]));
+ 
+@@ -253,7 +253,7 @@ mod tests {
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+         for key in range.clone() {
+             let hash = B256::with_last_byte(key);
+-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
++            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
+         }
+         let root = hash_builder.root();
+         assert_eq!(
+@@ -282,7 +282,7 @@ mod tests {
+         let retainer = ProofRetainer::from_iter([target.clone()]);
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+         for key in &existing_keys {
+-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
++            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
+         }
+         let root = hash_builder.root();
+         assert_eq!(
+@@ -308,9 +308,9 @@ mod tests {
+         let retainer = ProofRetainer::from_iter([target.clone()]);
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+         for key in &existing_keys {
+-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
++            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
+         }
+-        hash_builder.add_leaf(target.clone(), &value[..]);
++        hash_builder.add_leaf(target.clone(), &value[..], false);
+         let root = hash_builder.root();
+         assert_eq!(
+             root,
+@@ -350,7 +350,7 @@ mod tests {
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+         for key in range.clone() {
+             let hash = B256::with_last_byte(key);
+-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
++            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
+         }
+         let root = hash_builder.root();
+         assert_eq!(
+@@ -382,7 +382,7 @@ mod tests {
+         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+         for key in range.clone() {
+             let hash = B256::repeat_byte(key);
+-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
++            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
+         }
+         let root = hash_builder.root();
+         assert_eq!(
+@@ -499,18 +499,18 @@ mod tests {
+         let mut buffer = vec![];
+ 
+         let value = vec![0x64];
+-        let child_leaf = TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()));
++        let child_leaf = TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), false));
+ 
+         let child_branch = TrieNode::Branch(BranchNode::new(
+             vec![
+                 {
+                     buffer.clear();
+-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()))
++                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), false))
+                         .rlp(&mut buffer)
+                 },
+                 {
+                     buffer.clear();
+-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value))
++                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value, false))
+                         .rlp(&mut buffer)
+                 },
+             ],
+diff --git a/src/root.rs b/src/root.rs
+index afb4f50..c217006 100644
+--- a/src/root.rs
++++ b/src/root.rs
+@@ -41,7 +41,8 @@ where
+         value_buffer.clear();
+         encode(&items[index], &mut value_buffer);
+ 
+-        hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer);
++        let is_private = false; // TODO: fix
++        hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer, is_private);
+     }
+ 
+     hb.root()
+@@ -58,15 +59,16 @@ mod ethereum {
+ 
+     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
+     /// See [`storage_root_unsorted`] for more info.
+-    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
+-        storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
++    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
++        storage_root_unsorted(storage.into_iter().map(|(slot, value, is_private)| (keccak256(slot), value, is_private)))
+     }
+ 
+     /// Sorts and calculates the root hash of account storage trie.
+     /// See [`storage_root`] for more info.
+-    pub fn storage_root_unsorted(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
++    pub fn storage_root_unsorted(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
++        // transform the storage keys
+         let mut v = Vec::from_iter(storage);
+-        v.sort_unstable_by_key(|(key, _)| *key);
++        v.sort_unstable_by_key(|(key, _, _)| *key);
+         storage_root(v)
+     }
+ 
+@@ -75,12 +77,13 @@ mod ethereum {
+     /// # Panics
+     ///
+     /// If the items are not in sorted order.
+-    pub fn storage_root(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
++    pub fn storage_root(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+         let mut hb = HashBuilder::default();
+-        for (hashed_slot, value) in storage {
++        for (hashed_slot, value, is_private) in storage {
+             hb.add_leaf(
+                 Nibbles::unpack(hashed_slot),
+                 alloy_rlp::encode_fixed_size(&value).as_ref(),
++                is_private,
+             );
+         }
+         hb.root()
+@@ -128,10 +131,11 @@ mod ethereum {
+     pub fn state_root<A: Into<TrieAccount>>(state: impl IntoIterator<Item = (B256, A)>) -> B256 {
+         let mut hb = HashBuilder::default();
+         let mut account_rlp_buf = Vec::new();
++        let is_private = false; // account nodes are always public
+         for (hashed_key, account) in state {
+             account_rlp_buf.clear();
+             account.into().encode(&mut account_rlp_buf);
+-            hb.add_leaf(Nibbles::unpack(hashed_key), &account_rlp_buf);
++            hb.add_leaf(Nibbles::unpack(hashed_key), &account_rlp_buf, is_private);
+         }
+         hb.root()
+     }
