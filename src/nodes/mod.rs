@@ -115,7 +115,8 @@ impl Decodable for TrieNode {
                 };
 
                 let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
-                let node = if key_flag == LeafNode::PUB_EVEN_FLAG || key_flag == LeafNode::PUB_ODD_FLAG {
+                let is_leaf = is_private_opt.is_some();
+                let node = if is_leaf {
                     let value = Bytes::decode(&mut items.remove(0))?.into();
                     Self::Leaf(LeafNode::new(key, value, is_private_opt.unwrap()))
                 } else {

@@ -457,7 +457,7 @@ mod tests {
         I: Iterator<Item = (K, &'a U256)>,
         K: AsRef<[u8]> + Ord,
     {
-        let mut hashed = iter
+        let hashed = iter
             .map(|(key, val)| (key, val.to_be_bytes_vec()))
             .collect::<BTreeMap<_, _>>();
 
