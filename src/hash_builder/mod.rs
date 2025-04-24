@@ -623,23 +623,26 @@ mod tests {
         let _root = hb.root();
     }
 
+    #[test]
     fn manual_branch_node_ok() {
+        let is_private = false; // used to adapt legacy tests
         let raw_input = [
             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
         ];
+        let expected = triehash_trie_root(raw_input.clone());
 
         // We create the hash builder and add the leaves
         let mut hb = HashBuilder::default();
         for (key, val) in &raw_input {
-            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), is_private);
         }
 
         // Manually create the branch node that should be there after the first 2 leaves are added.
         // Skip the 0th element given in this example they have a common prefix and will
         // collapse to a Branch node.
-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), false);
-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), false);
+        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), is_private);
+        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), is_private);
         let mut branch: [&dyn Encodable; 17] = [b""; 17];
         // We set this to `4` and `7` because that matches the 2nd element of the corresponding
         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
@@ -647,16 +650,52 @@ mod tests {
         branch[7] = &leaf2;
         let mut branch_node_rlp = Vec::new();
         alloy_rlp::encode_list::<_, dyn Encodable>(&branch, &mut branch_node_rlp);
-        let expected = keccak256(branch_node_rlp);
+        let branch_node_hash = keccak256(branch_node_rlp);
 
-        // Create a new hash builder and add the leaves one by one
         let mut hb2 = HashBuilder::default();
-        for (key, val) in &raw_input {
-            hb2.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
-        }
+        // Insert the branch with the `0x6` shared prefix.
+        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
 
         assert_eq!(hb.root(), expected);
         assert_eq!(hb2.root(), expected);
+    }
+
+    #[test]
+    fn manual_branch_node_ok_with_private_leaves() {
+        let is_private = true;
+        let raw_input = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        let public_expected = triehash_trie_root(raw_input.clone());
+
+        // We create the hash builder and add the leaves
+        let mut hb = HashBuilder::default();
+        for (key, val) in &raw_input {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), is_private);
+        }
+        let hb_root = hb.root();
+
+        // Manually create the branch node that should be there after the first 2 leaves are added.
+        // Skip the 0th element given in this example they have a common prefix and will
+        // collapse to a Branch node.
+        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone(), is_private);
+        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone(), is_private);
+        let mut branch: [&dyn Encodable; 17] = [b""; 17];
+        // We set this to `4` and `7` because that matches the 2nd element of the corresponding
+        // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
+        branch[4] = &leaf1;
+        branch[7] = &leaf2;
+        let mut branch_node_rlp = Vec::new();
+        alloy_rlp::encode_list::<_, dyn Encodable>(&branch, &mut branch_node_rlp);
+        let branch_node_hash = keccak256(branch_node_rlp);
+
+        let mut hb2 = HashBuilder::default();
+        // Insert the branch with the `0x6` shared prefix.
+        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
+
+        assert_eq!(hb_root, hb2.root());
+        assert_ne!(hb_root, public_expected);
     }
 
     #[test]
