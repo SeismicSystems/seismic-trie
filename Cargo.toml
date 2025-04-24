@@ -109,6 +109,3 @@ ethereum = []
 name = "bench"
 harness = false
 required-features = ["arbitrary"]
-
-[patch.crates-io]
-alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "5dc07cc" }
