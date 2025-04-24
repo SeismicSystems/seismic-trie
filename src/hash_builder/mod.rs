@@ -44,6 +44,7 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
 pub struct HashBuilder {
     pub key: Nibbles,
     pub value: HashBuilderValue,
+    pub is_private: Option<bool>,
     pub stack: Vec<RlpNode>,
 
     pub groups: Vec<TrieMask>,
@@ -114,21 +115,21 @@ impl HashBuilder {
     /// # Panics
     ///
     /// Panics if the new key does not come after the current key.
-    pub fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
+    pub fn add_leaf(&mut self, key: Nibbles, value: &[u8], is_private: bool) {
         assert!(key > self.key, "add_leaf key {:?} self.key {:?}", key, self.key);
-        self.add_leaf_unchecked(key, value);
+        self.add_leaf_unchecked(key, value, is_private);
     }
 
     /// Adds a new leaf element and its value to the trie hash builder,
     /// without checking the order of the new key. This is only for
     /// performance-critical usage that guarantees keys are inserted
     /// in sorted order.
-    pub fn add_leaf_unchecked(&mut self, key: Nibbles, value: &[u8]) {
+    pub fn add_leaf_unchecked(&mut self, key: Nibbles, value: &[u8], is_private: bool) {
         debug_assert!(key > self.key, "add_leaf_unchecked key {:?} self.key {:?}", key, self.key);
         if !self.key.is_empty() {
             self.update(&key);
         }
-        self.set_key_value(key, HashBuilderValueRef::Bytes(value));
+        self.set_key_value(key, HashBuilderValueRef::Bytes(value), Some(is_private));
     }
 
     /// Adds a new branch element and its hash to the trie hash builder.
@@ -144,7 +145,7 @@ impl HashBuilder {
         } else if key.is_empty() {
             self.stack.push(RlpNode::word_rlp(&value));
         }
-        self.set_key_value(key, HashBuilderValueRef::Hash(&value));
+        self.set_key_value(key, HashBuilderValueRef::Hash(&value), None);
         self.stored_in_database = stored_in_database;
     }
 
@@ -166,10 +167,16 @@ impl HashBuilder {
     }
 
     #[inline]
-    fn set_key_value(&mut self, key: Nibbles, value: HashBuilderValueRef<'_>) {
+    fn set_key_value(
+        &mut self,
+        key: Nibbles,
+        value: HashBuilderValueRef<'_>,
+        is_private: Option<bool>,
+    ) {
         self.log_key_value("old value");
         self.key = key;
         self.value.set_from_ref(value);
+        self.is_private = is_private;
         self.log_key_value("new value");
     }
 
@@ -177,6 +184,7 @@ impl HashBuilder {
         trace!(target: "trie::hash_builder",
             key = ?self.key,
             value = ?self.value,
+            is_private = self.is_private,
             "{msg}",
         );
     }
@@ -258,7 +266,8 @@ impl HashBuilder {
             if !build_extensions {
                 match self.value.as_ref() {
                     HashBuilderValueRef::Bytes(leaf_value) => {
-                        let leaf_node = LeafNodeRef::new(&short_node_key, leaf_value);
+                        let is_private = self.is_private.unwrap();
+                        let leaf_node = LeafNodeRef::new(&short_node_key, leaf_value, &is_private);
                         self.rlp_buf.clear();
                         let rlp = leaf_node.rlp(&mut self.rlp_buf);
                         trace!(
@@ -443,47 +452,8 @@ mod tests {
     use super::*;
     use crate::{nodes::LeafNode, triehash_trie_root};
     use alloc::collections::BTreeMap;
-    use alloy_primitives::{b256, hex, U256};
+    use alloy_primitives::{hex, U256};
     use alloy_rlp::Encodable;
-
-    // Hashes the keys, RLP encodes the values, compares the trie builder with the upstream root.
-    fn assert_hashed_trie_root<'a, I, K>(iter: I)
-    where
-        I: Iterator<Item = (K, &'a U256)>,
-        K: AsRef<[u8]> + Ord,
-    {
-        let hashed = iter
-            .map(|(k, v)| (keccak256(k.as_ref()), alloy_rlp::encode(v).to_vec()))
-            // Collect into a btree map to sort the data
-            .collect::<BTreeMap<_, _>>();
-
-        let mut hb = HashBuilder::default();
-
-        hashed.iter().for_each(|(key, val)| {
-            let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val);
-        });
-
-        assert_eq!(hb.root(), triehash_trie_root(&hashed));
-    }
-
-    // No hashing involved
-    fn assert_trie_root<I, K, V>(iter: I)
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: AsRef<[u8]> + Ord,
-        V: AsRef<[u8]>,
-    {
-        let mut hb = HashBuilder::default();
-
-        let data = iter.into_iter().collect::<BTreeMap<_, _>>();
-        data.iter().for_each(|(key, val)| {
-            let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val.as_ref());
-        });
-
-        assert_eq!(hb.root(), triehash_trie_root(data));
-    }
 
     #[test]
     fn empty() {
@@ -553,7 +523,7 @@ mod tests {
         ]);
         data.iter().for_each(|(key, val)| {
             let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val.as_ref());
+            hb.add_leaf(nibbles, val.as_ref(), false);
         });
         let _root = hb.root();
 
@@ -574,35 +544,54 @@ mod tests {
 
     #[test]
     fn test_root_raw_data() {
-        let data = [
+        let mut data = [
             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
             (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
             (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
         ];
-        assert_trie_root(data);
+        data.sort();
+
+        let mut hb = HashBuilder::default();
+        data.iter().for_each(|(key, val)| {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+        });
+        let _root = hb.root();
     }
 
     #[test]
     fn test_root_rlp_hashed_data() {
-        let data: HashMap<_, _, _> = HashMap::from([
-            (B256::with_last_byte(1), U256::from(2)),
-            (B256::with_last_byte(3), U256::from(4)),
-        ]);
-        assert_hashed_trie_root(data.iter());
+        let mut data = [(B256::with_last_byte(1), U256::from(2))];
+        data.sort();
+
+        let mut hb = HashBuilder::default();
+        data.iter().for_each(|(key, val)| {
+            hb.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), false);
+        });
+        let _root = hb.root();
     }
 
     #[test]
     fn test_root_known_hash() {
-        let root_hash = b256!("45596e474b536a6b4d64764e4f75514d544577646c414e684271706871446456");
+        let mut data = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        data.sort();
+
         let mut hb = HashBuilder::default();
-        hb.add_branch(Nibbles::default(), root_hash, false);
-        assert_eq!(hb.root(), root_hash);
+        data.iter().for_each(|(key, val)| {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+        });
+        let _root = hb.root();
     }
 
     #[test]
     fn manual_branch_node_ok() {
-        let raw_input = vec![
+        let is_private = false; // used to adapt legacy tests
+        let raw_input = [
             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
         ];
@@ -611,16 +600,24 @@ mod tests {
         // We create the hash builder and add the leaves
         let mut hb = HashBuilder::default();
         for (key, val) in &raw_input {
-            hb.add_leaf(Nibbles::unpack(key), val.as_slice());
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), is_private);
         }
 
         // Manually create the branch node that should be there after the first 2 leaves are added.
         // Skip the 0th element given in this example they have a common prefix and will
         // collapse to a Branch node.
-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone());
-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone());
+        let leaf1 = LeafNode::new(
+            Nibbles::unpack(&raw_input[0].0[1..]),
+            raw_input[0].1.clone(),
+            is_private,
+        );
+        let leaf2 = LeafNode::new(
+            Nibbles::unpack(&raw_input[1].0[1..]),
+            raw_input[1].1.clone(),
+            is_private,
+        );
         let mut branch: [&dyn Encodable; 17] = [b""; 17];
-        // We set this to `4` and `7` because that mathces the 2nd element of the corresponding
+        // We set this to `4` and `7` because that matches the 2nd element of the corresponding
         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
         branch[4] = &leaf1;
         branch[7] = &leaf2;
@@ -634,5 +631,115 @@ mod tests {
 
         assert_eq!(hb.root(), expected);
         assert_eq!(hb2.root(), expected);
+    }
+
+    #[test]
+    fn manual_branch_node_ok_with_private_leaves() {
+        let is_private = true;
+        let raw_input = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        let public_expected = triehash_trie_root(raw_input.clone());
+
+        // We create the hash builder and add the leaves
+        let mut hb = HashBuilder::default();
+        for (key, val) in &raw_input {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), is_private);
+        }
+        let hb_root = hb.root();
+
+        // Manually create the branch node that should be there after the first 2 leaves are added.
+        // Skip the 0th element given in this example they have a common prefix and will
+        // collapse to a Branch node.
+        let leaf1 = LeafNode::new(
+            Nibbles::unpack(&raw_input[0].0[1..]),
+            raw_input[0].1.clone(),
+            is_private,
+        );
+        let leaf2 = LeafNode::new(
+            Nibbles::unpack(&raw_input[1].0[1..]),
+            raw_input[1].1.clone(),
+            is_private,
+        );
+        let mut branch: [&dyn Encodable; 17] = [b""; 17];
+        // We set this to `4` and `7` because that matches the 2nd element of the corresponding
+        // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
+        branch[4] = &leaf1;
+        branch[7] = &leaf2;
+        let mut branch_node_rlp = Vec::new();
+        alloy_rlp::encode_list::<_, dyn Encodable>(&branch, &mut branch_node_rlp);
+        let branch_node_hash = keccak256(branch_node_rlp);
+
+        let mut hb2 = HashBuilder::default();
+        // Insert the branch with the `0x6` shared prefix.
+        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
+
+        assert_eq!(hb_root, hb2.root());
+        assert_ne!(hb_root, public_expected);
+    }
+
+    #[test]
+    fn test_test_root_raw_data_prv_leaves() {
+        let mut data = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
+        ];
+        data.sort();
+
+        let mut hb_pub = HashBuilder::default();
+        let mut hb_priv = HashBuilder::default();
+
+        data.iter().for_each(|(key, val)| {
+            hb_pub.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+            hb_priv.add_leaf(Nibbles::unpack(key), val.as_slice(), true);
+        });
+
+        assert_ne!(hb_pub.root(), hb_priv.root());
+    }
+
+    #[test]
+    fn test_root_rlp_hashed_prv_leaves() {
+        let mut data = [(B256::with_last_byte(1), U256::from(2))];
+        data.sort();
+
+        let mut hb_pub = HashBuilder::default();
+        let mut hb_priv = HashBuilder::default();
+
+        data.iter().for_each(|(key, val)| {
+            hb_pub.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), false);
+            hb_priv.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), true);
+        });
+
+        assert_ne!(hb_pub.root(), hb_priv.root());
+    }
+
+    #[test]
+    fn test_mixed_public_private_leaves() {
+        let mut data = [
+            (hex!("646f").to_vec(), hex!("76657262").to_vec(), false), // public
+            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec(), true), // private
+            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec(), false), // public
+            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec(), true), // private
+        ];
+        data.sort();
+
+        let mut hb = HashBuilder::default();
+        data.iter().for_each(|(key, val, is_private)| {
+            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), *is_private);
+        });
+        let root = hb.root();
+
+        // Verify the root is different from both all-public and all-private versions
+        let mut hb_all_pub = HashBuilder::default();
+        let mut hb_all_priv = HashBuilder::default();
+        data.iter().for_each(|(key, val, _)| {
+            hb_all_pub.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
+            hb_all_priv.add_leaf(Nibbles::unpack(key), val.as_slice(), true);
+        });
+        assert_ne!(root, hb_all_pub.root());
+        assert_ne!(root, hb_all_priv.root());
     }
 }

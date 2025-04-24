@@ -16,11 +16,15 @@ pub const fn adjust_index_for_rlp(i: usize, len: usize) -> usize {
 }
 
 /// Compute a trie root of the collection of rlp encodable items.
+/// This function does not support private nodes.
+/// and is used for things like receipt roots rather than state roots.
 pub fn ordered_trie_root<T: Encodable>(items: &[T]) -> B256 {
     ordered_trie_root_with_encoder(items, |item, buf| item.encode(buf))
 }
 
 /// Compute a trie root of the collection of items with a custom encoder.
+/// This function does not support private nodes.
+/// and is used for things like receipt roots rather than state roots.
 pub fn ordered_trie_root_with_encoder<T, F>(items: &[T], mut encode: F) -> B256
 where
     F: FnMut(&T, &mut Vec<u8>),
@@ -41,7 +45,8 @@ where
         value_buffer.clear();
         encode(&items[index], &mut value_buffer);
 
-        hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer);
+        let is_private = false; // TODO: fix
+        hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer, is_private);
     }
 
     hb.root()
@@ -58,15 +63,20 @@ mod ethereum {
 
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
-    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
-        storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
+    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+        storage_root_unsorted(
+            storage
+                .into_iter()
+                .map(|(slot, value, is_private)| (keccak256(slot), value, is_private)),
+        )
     }
 
     /// Sorts and calculates the root hash of account storage trie.
     /// See [`storage_root`] for more info.
-    pub fn storage_root_unsorted(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
+    pub fn storage_root_unsorted(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+        // transform the storage keys
         let mut v = Vec::from_iter(storage);
-        v.sort_unstable_by_key(|(key, _)| *key);
+        v.sort_unstable_by_key(|(key, _, _)| *key);
         storage_root(v)
     }
 
@@ -75,12 +85,13 @@ mod ethereum {
     /// # Panics
     ///
     /// If the items are not in sorted order.
-    pub fn storage_root(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
+    pub fn storage_root(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
         let mut hb = HashBuilder::default();
-        for (hashed_slot, value) in storage {
+        for (hashed_slot, value, is_private) in storage {
             hb.add_leaf(
                 Nibbles::unpack(hashed_slot),
                 alloy_rlp::encode_fixed_size(&value).as_ref(),
+                is_private,
             );
         }
         hb.root()
@@ -128,10 +139,11 @@ mod ethereum {
     pub fn state_root<A: Into<TrieAccount>>(state: impl IntoIterator<Item = (B256, A)>) -> B256 {
         let mut hb = HashBuilder::default();
         let mut account_rlp_buf = Vec::new();
+        let is_private = false; // account nodes are always public
         for (hashed_key, account) in state {
             account_rlp_buf.clear();
             account.into().encode(&mut account_rlp_buf);
-            hb.add_leaf(Nibbles::unpack(hashed_key), &account_rlp_buf);
+            hb.add_leaf(Nibbles::unpack(hashed_key), &account_rlp_buf, is_private);
         }
         hb.root()
     }

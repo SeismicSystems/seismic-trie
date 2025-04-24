@@ -20,6 +20,7 @@ pub fn verify_proof<'a, I>(
     root: B256,
     key: Nibbles,
     expected_value: Option<Vec<u8>>,
+    expected_is_private: bool,
     proof: I,
 ) -> Result<(), ProofVerificationError>
 where
@@ -37,6 +38,8 @@ where
                     path: key,
                     got: None,
                     expected: expected_value.map(Bytes::from),
+                    got_private: false,
+                    expected_private: true,
                 })
             }
         } else {
@@ -46,13 +49,20 @@ where
 
     let mut walked_path = Nibbles::with_capacity(key.len());
     let mut last_decoded_node = Some(NodeDecodingResult::Node(RlpNode::word_rlp(&root)));
+    let mut last_decoded_node_is_private = false;
     for node in proof {
         // Check if the node that we just decoded (or root node, if we just started) matches
         // the expected node from the proof.
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
             let got = Some(Bytes::copy_from_slice(node));
             let expected = last_decoded_node.as_deref().map(Bytes::copy_from_slice);
-            return Err(ProofVerificationError::ValueMismatch { path: walked_path, got, expected });
+            return Err(ProofVerificationError::ValueMismatch {
+                path: walked_path,
+                got,
+                expected,
+                got_private: last_decoded_node_is_private,
+                expected_private: false,
+            });
         }
 
         // Decode the next node from the proof.
@@ -64,6 +74,7 @@ where
             }
             TrieNode::Leaf(leaf) => {
                 walked_path.extend_from_slice(&leaf.key);
+                last_decoded_node_is_private = leaf.is_private;
                 Some(NodeDecodingResult::Value(leaf.value))
             }
             TrieNode::EmptyRoot => return Err(ProofVerificationError::UnexpectedEmptyRoot),
@@ -72,13 +83,17 @@ where
 
     // Last decoded node should have the key that we are looking for.
     last_decoded_node = last_decoded_node.filter(|_| walked_path == key);
-    if last_decoded_node.as_deref() == expected_value.as_deref() {
+    if last_decoded_node.as_deref() == expected_value.as_deref()
+        && last_decoded_node_is_private == expected_is_private
+    {
         Ok(())
     } else {
         Err(ProofVerificationError::ValueMismatch {
             path: key,
             got: last_decoded_node.as_deref().map(Bytes::copy_from_slice),
             expected: expected_value.map(Bytes::from),
+            got_private: last_decoded_node_is_private,
+            expected_private: expected_is_private,
         })
     }
 }
@@ -190,6 +205,7 @@ mod tests {
 
     #[test]
     fn empty_trie() {
+        let empty_is_private = false;
         let key = Nibbles::unpack(B256::repeat_byte(42));
         let mut hash_builder = HashBuilder::default().with_proof_retainer(ProofRetainer::default());
         let root = hash_builder.root();
@@ -203,7 +219,8 @@ mod tests {
                 root,
                 key.clone(),
                 None,
-                proof.into_nodes_sorted().iter().map(|(_, node)| node)
+                empty_is_private,
+                proof.into_nodes_sorted().iter().map(|(_, node)| node),
             ),
             Ok(())
         );
@@ -211,33 +228,38 @@ mod tests {
         let mut dummy_proof = vec![];
         BranchNode::default().encode(&mut dummy_proof);
         assert_eq!(
-            verify_proof(root, key, None, [&Bytes::from(dummy_proof.clone())]),
+            verify_proof(root, key, None, empty_is_private, [&Bytes::from(dummy_proof.clone())]),
             Err(ProofVerificationError::ValueMismatch {
                 path: Nibbles::default(),
                 got: Some(Bytes::from(dummy_proof)),
-                expected: Some(Bytes::from(RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec()))
+                expected: Some(Bytes::from(RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec())),
+                got_private: false,
+                expected_private: empty_is_private,
             })
         );
     }
 
     #[test]
     fn single_leaf_trie_proof_verification() {
+        let is_private = false; // basic test with no private leaf
         let target = Nibbles::unpack(B256::with_last_byte(0x2));
         let target_value = B256::with_last_byte(0x2);
         let non_existent_target = Nibbles::unpack(B256::with_last_byte(0x3));
 
         let retainer = ProofRetainer::from_iter([target.clone(), non_existent_target]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
-        hash_builder.add_leaf(target.clone(), &target_value[..]);
+        hash_builder.add_leaf(target.clone(), &target_value[..], is_private);
         let root = hash_builder.root();
         assert_eq!(root, triehash_trie_root([(target.pack(), target.pack())]));
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
+        println!("{:?}", proof);
         assert_eq!(
             verify_proof(
                 root,
                 target,
                 Some(target_value.to_vec()),
+                is_private,
                 proof.iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -245,7 +267,75 @@ mod tests {
     }
 
     #[test]
+    fn private_leaf_trie_proof_verification() {
+        // Create two leaves with different keys and values
+        let first_key = Nibbles::unpack(B256::with_last_byte(0x1));
+        let first_value = B256::with_last_byte(0x1);
+        let second_key = Nibbles::unpack(B256::with_last_byte(0x2));
+        let second_value = B256::with_last_byte(0x2);
+
+        // Create a retainer for both keys
+        let retainer = ProofRetainer::from_iter([first_key.clone(), second_key.clone()]);
+        let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+
+        // Add both leaves
+        hash_builder.add_leaf(first_key.clone(), &first_value[..], false);
+        hash_builder.add_leaf(second_key.clone(), &second_value[..], true);
+
+        let root = hash_builder.root();
+        let proof = hash_builder.take_proof_nodes();
+
+        // Get proof nodes for first leaf
+        let first_proof = proof.matching_nodes_sorted(&first_key);
+        // Verify first leaf exists
+        assert_eq!(
+            verify_proof(
+                root,
+                first_key.clone(),
+                Some(first_value.to_vec()),
+                false,
+                first_proof.iter().map(|(_, node)| node)
+            ),
+            Ok(())
+        );
+        // Verify private version does not exist
+        assert!(verify_proof(
+            root,
+            first_key.clone(),
+            Some(first_value.to_vec()),
+            true,
+            first_proof.iter().map(|(_, node)| node)
+        )
+        .is_err());
+
+        // Get proof nodes for second leaf
+        let second_proof = proof.matching_nodes_sorted(&second_key);
+
+        // Verify second leaf exists
+        assert_eq!(
+            verify_proof(
+                root,
+                second_key.clone(),
+                Some(second_value.to_vec()),
+                true,
+                second_proof.iter().map(|(_, node)| node)
+            ),
+            Ok(())
+        );
+        // verify public version does not exist
+        assert!(verify_proof(
+            root,
+            second_key.clone(),
+            Some(second_value.to_vec()),
+            false,
+            second_proof.iter().map(|(_, node)| node)
+        )
+        .is_err());
+    }
+
+    #[test]
     fn non_existent_proof_verification() {
+        let is_priavte = false;
         let range = 0..=0xf;
         let target = Nibbles::unpack(B256::with_last_byte(0xff));
 
@@ -253,7 +343,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::with_last_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -262,11 +352,15 @@ mod tests {
         );
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
-        assert_eq!(verify_proof(root, target, None, proof.iter().map(|(_, node)| node)), Ok(()));
+        assert_eq!(
+            verify_proof(root, target, None, is_priavte, proof.iter().map(|(_, node)| node)),
+            Ok(())
+        );
     }
 
     #[test]
     fn proof_verification_with_divergent_node() {
+        let is_private = false;
         let existing_keys = [
             hex!("0000000000000000000000000000000000000000000000000000000000000000"),
             hex!("3a00000000000000000000000000000000000000000000000000000000000000"),
@@ -282,7 +376,7 @@ mod tests {
         let retainer = ProofRetainer::from_iter([target.clone()]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in &existing_keys {
-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
+            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -300,6 +394,7 @@ mod tests {
                 root,
                 target.clone(),
                 None,
+                is_private,
                 proof.into_nodes_sorted().iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -308,9 +403,9 @@ mod tests {
         let retainer = ProofRetainer::from_iter([target.clone()]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in &existing_keys {
-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
+            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
         }
-        hash_builder.add_leaf(target.clone(), &value[..]);
+        hash_builder.add_leaf(target.clone(), &value[..], false);
         let root = hash_builder.root();
         assert_eq!(
             root,
@@ -334,6 +429,7 @@ mod tests {
                 root,
                 target,
                 Some(value.to_vec()),
+                is_private,
                 proof.into_nodes_sorted().iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -342,6 +438,7 @@ mod tests {
 
     #[test]
     fn extension_root_trie_proof_verification() {
+        let is_private = false;
         let range = 0..=0xff;
         let target = Nibbles::unpack(B256::with_last_byte(0x42));
         let target_value = B256::with_last_byte(0x42);
@@ -350,7 +447,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::with_last_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -364,6 +461,7 @@ mod tests {
                 root,
                 target,
                 Some(target_value.to_vec()),
+                is_private,
                 proof.iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -372,6 +470,7 @@ mod tests {
 
     #[test]
     fn wide_trie_proof_verification() {
+        let is_private = false;
         let range = 0..=0xff;
         let target1 = Nibbles::unpack(B256::repeat_byte(0x42));
         let target1_value = B256::repeat_byte(0x42);
@@ -382,7 +481,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::repeat_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -397,6 +496,7 @@ mod tests {
                 root,
                 target1.clone(),
                 Some(target1_value.to_vec()),
+                is_private,
                 proof.matching_nodes_sorted(&target1).iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -407,6 +507,7 @@ mod tests {
                 root,
                 target2.clone(),
                 Some(target2_value.to_vec()),
+                is_private,
                 proof.matching_nodes_sorted(&target2).iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -415,6 +516,7 @@ mod tests {
 
     #[test]
     fn proof_verification_with_node_encoded_in_place() {
+        let is_private = false;
         // Building a trie with a leaf, branch, and extension encoded in place:
         //
         // - node `2a`: 0x64
@@ -499,18 +601,23 @@ mod tests {
         let mut buffer = vec![];
 
         let value = vec![0x64];
-        let child_leaf = TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()));
+        let child_leaf =
+            TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), false));
 
         let child_branch = TrieNode::Branch(BranchNode::new(
             vec![
                 {
                     buffer.clear();
-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()))
-                        .rlp(&mut buffer)
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xa]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
                 },
                 {
                     buffer.clear();
-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value))
+                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value, false))
                         .rlp(&mut buffer)
                 },
             ],
@@ -559,14 +666,21 @@ mod tests {
         let proof = vec![&root_encoded];
 
         // Node `2a`: 0x64
-        verify_proof(root_hash, Nibbles::from_nibbles([0x2, 0xa]), Some(vec![0x64]), proof.clone())
-            .unwrap();
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x2, 0xa]),
+            Some(vec![0x64]),
+            is_private,
+            proof.clone(),
+        )
+        .unwrap();
 
         // Node `32a`: 0x64
         verify_proof(
             root_hash,
             Nibbles::from_nibbles([0x3, 0x2, 0xa]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -576,6 +690,7 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x3, 0x3, 0xb]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -585,6 +700,7 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x4, 0x1, 0x2, 0xa]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -594,6 +710,7 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x4, 0x1, 0x3, 0xb]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
