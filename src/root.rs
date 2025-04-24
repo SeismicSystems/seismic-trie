@@ -63,11 +63,13 @@ mod ethereum {
 
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
-    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+    /// This function is used for testing by various downstream crates
+    /// Thus we leave the signature unchanged and do not support private nodes.
+    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
         storage_root_unsorted(
             storage
                 .into_iter()
-                .map(|(slot, value, is_private)| (keccak256(slot), value, is_private)),
+                .map(|(slot, value)| (keccak256(slot), value, false)),
         )
     }
 
