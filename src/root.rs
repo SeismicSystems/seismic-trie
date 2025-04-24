@@ -16,11 +16,15 @@ pub const fn adjust_index_for_rlp(i: usize, len: usize) -> usize {
 }
 
 /// Compute a trie root of the collection of rlp encodable items.
+/// This function does not support private nodes.
+/// and is used for things like receipt roots rather than state roots.
 pub fn ordered_trie_root<T: Encodable>(items: &[T]) -> B256 {
     ordered_trie_root_with_encoder(items, |item, buf| item.encode(buf))
 }
 
 /// Compute a trie root of the collection of items with a custom encoder.
+/// This function does not support private nodes.
+/// and is used for things like receipt roots rather than state roots.
 pub fn ordered_trie_root_with_encoder<T, F>(items: &[T], mut encode: F) -> B256
 where
     F: FnMut(&T, &mut Vec<u8>),
