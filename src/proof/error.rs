@@ -16,10 +16,14 @@ pub enum ProofVerificationError {
     ValueMismatch {
         /// Path at which error occurred.
         path: Nibbles,
-        /// Value in the proof.
+        /// Value in the proof.xw
         got: Option<Bytes>,
         /// Expected value.
         expected: Option<Bytes>,
+        /// Whether the node is private.
+        got_private: bool,
+        /// expected private.
+        expected_private: bool,
     },
     /// Encountered unexpected empty root node.
     UnexpectedEmptyRoot,
@@ -48,8 +52,8 @@ impl fmt::Display for ProofVerificationError {
             Self::RootMismatch { got, expected } => {
                 write!(f, "root mismatch. got: {got}. expected: {expected}")
             }
-            Self::ValueMismatch { path, got, expected } => {
-                write!(f, "value mismatch at path {path:?}. got: {got:?}. expected: {expected:?}")
+            Self::ValueMismatch { path, got, expected, got_private, expected_private } => {
+                write!(f, "value mismatch at path {path:?}. got: {got:?}. expected: {expected:?}, got private: {got_private}, expected private: {expected_private}")
             }
             Self::UnexpectedEmptyRoot => {
                 write!(f, "unexpected empty root node")
