@@ -447,46 +447,8 @@ mod tests {
     use super::*;
     use crate::{nodes::LeafNode, triehash_trie_root};
     use alloc::collections::BTreeMap;
-    use alloy_primitives::{b256, hex, U256};
+    use alloy_primitives::{hex, U256};
     use alloy_rlp::Encodable;
-
-    // Hashes the keys, RLP encodes the values, compares the trie builder with the upstream root.
-    // is_private is hardcoded to false because this helper is only used for testing with public state
-    fn assert_hashed_trie_root<'a, I, K>(iter: I)
-    where
-        I: Iterator<Item = (K, &'a U256)>,
-        K: AsRef<[u8]> + Ord,
-    {
-        let hashed = iter
-            .map(|(key, val)| (key, val.to_be_bytes_vec()))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut hb = HashBuilder::default();
-
-        hashed.iter().for_each(|(key, val)| {
-            let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val, false);
-        });
-
-        assert_eq!(hb.root(), triehash_trie_root(&hashed));
-    }
-
-    // No hashing involved
-    fn assert_trie_root<I, K, V>(iter: I)
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: AsRef<[u8]> + Ord,
-        V: AsRef<[u8]>,
-    {
-        let mut hb = HashBuilder::default();
-        let data = iter.into_iter().collect::<BTreeMap<_, _>>();
-        data.iter().for_each(|(key, val)| {
-            let nibbles = Nibbles::unpack(key);
-            hb.add_leaf(nibbles, val.as_ref(), false);
-        });
-
-        assert_eq!(hb.root(), triehash_trie_root(data));
-    }
 
     #[test]
     fn empty() {
