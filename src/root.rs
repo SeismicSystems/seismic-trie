@@ -1,6 +1,6 @@
 use crate::{HashBuilder, EMPTY_ROOT_HASH};
 use alloc::vec::Vec;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::B256;
 use alloy_rlp::Encodable;
 use nybbles::Nibbles;
 
@@ -52,49 +52,58 @@ where
     hb.root()
 }
 
-trait StorageValue {
-    fn is_private(&self) -> bool {
-        false
-    }
-    fn value(&self) -> &U256;
-}
-
-impl StorageValue for U256 {
-    fn value(&self) -> &Self {
-        self
-    }
-}
-impl StorageValue for (U256, bool) {
-    fn is_private(&self) -> bool {
-        self.1
-    }
-    fn value(&self) -> &U256 {
-        &self.0
-    }
-}
-
 /// Ethereum specific trie root functions.
 #[cfg(feature = "ethereum")]
 pub use ethereum::*;
 #[cfg(feature = "ethereum")]
 mod ethereum {
+    use alloy_primitives::U256;
+
+    /// Trait for storage values that can be marked as public or private
+    /// Useful for making the following functions generic over the type of storage value.
+    /// to avoid breaking changes in the API for downstream repos
+    pub trait FlaggedStorageValue {
+        /// returns whether the value is private
+        fn is_private(&self) -> bool {
+            false
+        }
+        /// returns the underlying value
+        fn value(&self) -> &U256;
+    }
+
+    impl FlaggedStorageValue for U256 {
+        fn value(&self) -> &Self {
+            self
+        }
+    }
+    impl FlaggedStorageValue for (U256, bool) {
+        fn is_private(&self) -> bool {
+            self.1
+        }
+        fn value(&self) -> &U256 {
+            &self.0
+        }
+    }
+
     use super::*;
     use crate::TrieAccount;
-    use alloy_primitives::{keccak256, Address, U256};
+    use alloy_primitives::{keccak256, Address};
 
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
-    pub fn storage_root_unhashed<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
-        storage_root_unsorted(
-            storage
-                .into_iter()
-                .map(|(slot, value)| (keccak256(slot), value)),
-        )
+    /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
+    pub fn storage_root_unhashed<T: FlaggedStorageValue>(
+        storage: impl IntoIterator<Item = (B256, T)>,
+    ) -> B256 {
+        storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
     }
 
     /// Sorts and calculates the root hash of account storage trie.
     /// See [`storage_root`] for more info.
-    pub fn storage_root_unsorted<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
+    /// /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
+    pub fn storage_root_unsorted<T: FlaggedStorageValue>(
+        storage: impl IntoIterator<Item = (B256, T)>,
+    ) -> B256 {
         // transform the storage keys
         let mut v = Vec::from_iter(storage);
         v.sort_unstable_by_key(|(key, _)| *key);
@@ -106,7 +115,10 @@ mod ethereum {
     /// # Panics
     ///
     /// If the items are not in sorted order.
-    pub fn storage_root<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
+    /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
+    pub fn storage_root<T: FlaggedStorageValue>(
+        storage: impl IntoIterator<Item = (B256, T)>,
+    ) -> B256 {
         let mut hb = HashBuilder::default();
         for (hashed_slot, value) in storage {
             hb.add_leaf(
