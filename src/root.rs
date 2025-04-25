@@ -53,19 +53,17 @@ where
 }
 
 trait StorageValue {
-    fn is_private(&self) -> bool;
+    fn is_private(&self) -> bool {
+        false
+    }
     fn value(&self) -> &U256;
 }
 
 impl StorageValue for U256 {
-    fn is_private(&self) -> bool {
-        false
-    }
     fn value(&self) -> &Self {
         self
     }
 }
-
 impl StorageValue for (U256, bool) {
     fn is_private(&self) -> bool {
         self.1
