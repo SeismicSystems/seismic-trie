@@ -1,6 +1,6 @@
 use crate::{HashBuilder, EMPTY_ROOT_HASH};
 use alloc::vec::Vec;
-use alloy_primitives::B256;
+use alloy_primitives::{B256, U256};
 use alloy_rlp::Encodable;
 use nybbles::Nibbles;
 
@@ -52,6 +52,29 @@ where
     hb.root()
 }
 
+trait StorageValue {
+    fn is_private(&self) -> bool;
+    fn value(&self) -> &U256;
+}
+
+impl StorageValue for U256 {
+    fn is_private(&self) -> bool {
+        false
+    }
+    fn value(&self) -> &Self {
+        self
+    }
+}
+
+impl StorageValue for (U256, bool) {
+    fn is_private(&self) -> bool {
+        self.1
+    }
+    fn value(&self) -> &U256 {
+        &self.0
+    }
+}
+
 /// Ethereum specific trie root functions.
 #[cfg(feature = "ethereum")]
 pub use ethereum::*;
@@ -63,20 +86,20 @@ mod ethereum {
 
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
-    pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+    pub fn storage_root_unhashed<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
         storage_root_unsorted(
             storage
                 .into_iter()
-                .map(|(slot, value, is_private)| (keccak256(slot), value, is_private)),
+                .map(|(slot, value)| (keccak256(slot), value)),
         )
     }
 
     /// Sorts and calculates the root hash of account storage trie.
     /// See [`storage_root`] for more info.
-    pub fn storage_root_unsorted(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+    pub fn storage_root_unsorted<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
         // transform the storage keys
         let mut v = Vec::from_iter(storage);
-        v.sort_unstable_by_key(|(key, _, _)| *key);
+        v.sort_unstable_by_key(|(key, _)| *key);
         storage_root(v)
     }
 
@@ -85,13 +108,13 @@ mod ethereum {
     /// # Panics
     ///
     /// If the items are not in sorted order.
-    pub fn storage_root(storage: impl IntoIterator<Item = (B256, U256, bool)>) -> B256 {
+    pub fn storage_root<T: StorageValue>(storage: impl IntoIterator<Item = (B256, T)>) -> B256 {
         let mut hb = HashBuilder::default();
-        for (hashed_slot, value, is_private) in storage {
+        for (hashed_slot, value) in storage {
             hb.add_leaf(
                 Nibbles::unpack(hashed_slot),
-                alloy_rlp::encode_fixed_size(&value).as_ref(),
-                is_private,
+                alloy_rlp::encode_fixed_size(value.value()).as_ref(),
+                value.is_private(),
             );
         }
         hb.root()
