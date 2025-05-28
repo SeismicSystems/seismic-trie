@@ -452,8 +452,46 @@ mod tests {
     use super::*;
     use crate::{nodes::LeafNode, triehash_trie_root};
     use alloc::collections::BTreeMap;
-    use alloy_primitives::{hex, U256};
+    use alloy_primitives::{b256, hex, U256};
     use alloy_rlp::Encodable;
+
+    fn assert_hashed_trie_root<'a, I, K>(iter: I)
+    where
+        I: Iterator<Item = (K, &'a U256)>,
+        K: AsRef<[u8]> + Ord,
+    {
+        let hashed = iter
+            .map(|(k, v)| (keccak256(k.as_ref()), alloy_rlp::encode(v).to_vec()))
+            // Collect into a btree map to sort the data
+            .collect::<BTreeMap<_, _>>();
+
+        let mut hb = HashBuilder::default();
+
+        hashed.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val, false);
+        });
+
+        assert_eq!(hb.root(), triehash_trie_root(&hashed));
+    }
+
+    // No hashing involved
+    fn assert_trie_root<I, K, V>(iter: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<[u8]> + Ord,
+        V: AsRef<[u8]>,
+    {
+        let mut hb = HashBuilder::default();
+
+        let data = iter.into_iter().collect::<BTreeMap<_, _>>();
+        data.iter().for_each(|(key, val)| {
+            let nibbles = Nibbles::unpack(key);
+            hb.add_leaf(nibbles, val.as_ref(), false);
+        });
+
+        assert_eq!(hb.root(), triehash_trie_root(data));
+    }
 
     #[test]
     fn empty() {
@@ -544,48 +582,30 @@ mod tests {
 
     #[test]
     fn test_root_raw_data() {
-        let mut data = [
+        let data = [
             (hex!("646f").to_vec(), hex!("76657262").to_vec()),
             (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
             (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
             (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
         ];
-        data.sort();
-
-        let mut hb = HashBuilder::default();
-        data.iter().for_each(|(key, val)| {
-            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
-        });
-        let _root = hb.root();
+        assert_trie_root(data);
     }
 
     #[test]
     fn test_root_rlp_hashed_data() {
-        let mut data = [(B256::with_last_byte(1), U256::from(2))];
-        data.sort();
-
-        let mut hb = HashBuilder::default();
-        data.iter().for_each(|(key, val)| {
-            hb.add_leaf(Nibbles::unpack(key), &val.to_be_bytes_vec(), false);
-        });
-        let _root = hb.root();
+        let data: HashMap<_, _, _> = HashMap::from([
+            (B256::with_last_byte(1), U256::from(2)),
+            (B256::with_last_byte(3), U256::from(4)),
+        ]);
+        assert_hashed_trie_root(data.iter());
     }
 
     #[test]
     fn test_root_known_hash() {
-        let mut data = [
-            (hex!("646f").to_vec(), hex!("76657262").to_vec()),
-            (hex!("676f6f64").to_vec(), hex!("7075707079").to_vec()),
-            (hex!("676f6b32").to_vec(), hex!("7075707079").to_vec()),
-            (hex!("676f6b34").to_vec(), hex!("7075707079").to_vec()),
-        ];
-        data.sort();
-
+        let root_hash = b256!("45596e474b536a6b4d64764e4f75514d544577646c414e684271706871446456");
         let mut hb = HashBuilder::default();
-        data.iter().for_each(|(key, val)| {
-            hb.add_leaf(Nibbles::unpack(key), val.as_slice(), false);
-        });
-        let _root = hb.root();
+        hb.add_branch(Nibbles::default(), root_hash, false);
+        assert_eq!(hb.root(), root_hash);
     }
 
     #[test]

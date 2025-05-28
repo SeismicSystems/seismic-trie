@@ -806,7 +806,7 @@ mod tests {
             let retainer = ProofRetainer::from_iter(hashed.clone().into_keys().map(Nibbles::unpack));
             let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
             for (key, value) in hashed.clone() {
-                hash_builder.add_leaf(Nibbles::unpack(key), &value);
+                hash_builder.add_leaf(Nibbles::unpack(key), &value, false);
             }
 
             let root = hash_builder.root();
@@ -815,7 +815,7 @@ mod tests {
             let proofs = hash_builder.take_proof_nodes();
             for (key, value) in hashed {
                 let nibbles = Nibbles::unpack(key);
-                assert_eq!(verify_proof(root, nibbles.clone(), Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
+                assert_eq!(verify_proof(root, nibbles.clone(), Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
             }
         });
     }
