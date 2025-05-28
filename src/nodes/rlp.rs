@@ -78,10 +78,16 @@ impl RlpNode {
     /// RLP-encodes the given word and returns it as a new RLP node.
     #[inline]
     pub fn word_rlp(word: &B256) -> Self {
-        let mut arr = ArrayVec::new();
-        arr.push(EMPTY_STRING_CODE + 32);
-        arr.try_extend_from_slice(word.as_slice()).unwrap();
-        Self(arr)
+        let mut arr = [0u8; 33];
+        arr[0] = EMPTY_STRING_CODE + 32;
+        arr[1..].copy_from_slice(word.as_slice());
+        Self(ArrayVec::from(arr))
+    }
+
+    /// Returns true if this is an RLP-encoded hash.
+    #[inline]
+    pub fn is_hash(&self) -> bool {
+        self.len() == B256::len_bytes() + 1
     }
 
     /// Returns the RLP-encoded node as a slice.
@@ -93,7 +99,7 @@ impl RlpNode {
     /// Returns hash if this is an RLP-encoded hash
     #[inline]
     pub fn as_hash(&self) -> Option<B256> {
-        if self.len() == B256::len_bytes() + 1 {
+        if self.is_hash() {
             Some(B256::from_slice(&self.0[1..]))
         } else {
             None
