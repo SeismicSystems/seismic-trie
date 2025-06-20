@@ -26,6 +26,7 @@ pub const CHILD_INDEX_RANGE: Range<u8> = 0..16;
 
 /// Enum representing an MPT trie node.
 #[derive(PartialEq, Eq, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrieNode {
     /// Variant representing empty root node.
     EmptyRoot,
@@ -351,19 +352,19 @@ mod tests {
             prop_assert!(input.iter().all(|&nibble| nibble <= 0xf));
             let input_is_odd = input.len() % 2 == 1;
 
-            let compact_leaf = encode_path_leaf(&input, true);
+            let compact_leaf = encode_path_leaf(&input, true, false);
             let leaf_flag = compact_leaf[0];
             // Check flag
-            assert_ne!(leaf_flag & LeafNode::EVEN_FLAG, 0);
+            assert_ne!(leaf_flag & LeafNode::PUB_EVEN_FLAG, 0);
             assert_eq!(input_is_odd, (leaf_flag & ExtensionNode::ODD_FLAG) != 0);
             if input_is_odd {
                 assert_eq!(leaf_flag & 0x0f, input.first().unwrap());
             }
 
-            let compact_extension = encode_path_leaf(&input, false);
+            let compact_extension = encode_path_leaf(&input, false, false);
             let extension_flag = compact_extension[0];
             // Check first byte
-            assert_eq!(extension_flag & LeafNode::EVEN_FLAG, 0);
+            assert_eq!(extension_flag & LeafNode::PUB_EVEN_FLAG, 0);
             assert_eq!(input_is_odd, (extension_flag & ExtensionNode::ODD_FLAG) != 0);
             if input_is_odd {
                 assert_eq!(extension_flag & 0x0f, input.first().unwrap());
