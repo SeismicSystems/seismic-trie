@@ -156,6 +156,7 @@ impl HashBuilder {
             self.update(&Nibbles::default());
             self.key.clear();
             self.value.clear();
+            self.is_private = None;
         }
         let root = self.current_root();
         if root == EMPTY_ROOT_HASH {
