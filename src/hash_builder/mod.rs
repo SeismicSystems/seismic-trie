@@ -44,7 +44,7 @@ pub use value::{HashBuilderValue, HashBuilderValueRef};
 pub struct HashBuilder {
     pub key: Nibbles,
     pub value: HashBuilderValue,
-    pub is_private: Option<bool>,
+    pub is_private: Vec<Option<bool>>,
     pub stack: Vec<RlpNode>,
 
     pub state_masks: Vec<TrieMask>,
@@ -156,6 +156,8 @@ impl HashBuilder {
             self.update(&Nibbles::default());
             self.key.clear();
             self.value.clear();
+            // Clear privacy state to prevent cache pollution
+            self.is_private.clear();
         }
         let root = self.current_root();
         if root == EMPTY_ROOT_HASH {
@@ -176,15 +178,31 @@ impl HashBuilder {
         self.log_key_value("old value");
         self.key = key;
         self.value.set_from_ref(value);
-        self.is_private = is_private;
+
+        // Ensure is_private vector has enough capacity for the key length
+        if self.is_private.len() < self.key.len() {
+            self.is_private.resize(self.key.len(), None);
+        }
+
+        // Set privacy state at the leaf level (end of key)
+        if !self.key.is_empty() && is_private.is_some() {
+            self.is_private[self.key.len() - 1] = is_private;
+        }
+
         self.log_key_value("new value");
     }
 
     fn log_key_value(&self, msg: &str) {
+        let current_privacy = if !self.key.is_empty() && self.key.len() <= self.is_private.len() {
+            self.is_private.get(self.key.len() - 1).copied().flatten()
+        } else {
+            None
+        };
         trace!(target: "trie::hash_builder",
             key = ?self.key,
             value = ?self.value,
-            is_private = self.is_private,
+            is_private = current_privacy,
+            is_private_vec = ?self.is_private,
             "{msg}",
         );
     }
@@ -266,7 +284,13 @@ impl HashBuilder {
             if !build_extensions {
                 match self.value.as_ref() {
                     HashBuilderValueRef::Bytes(leaf_value) => {
-                        let is_private = self.is_private.unwrap();
+                        // Get privacy state for the current leaf level
+                        let is_private =
+                            if !current.is_empty() && current.len() <= self.is_private.len() {
+                                self.is_private[current.len() - 1].unwrap_or(false)
+                            } else {
+                                false
+                            };
                         let leaf_node = LeafNodeRef::new(&short_node_key, leaf_value, &is_private);
                         self.rlp_buf.clear();
                         let rlp = leaf_node.rlp(&mut self.rlp_buf);
@@ -328,6 +352,13 @@ impl HashBuilder {
 
             self.state_masks.resize(len, TrieMask::default());
             self.resize_masks(len);
+
+            // Clear privacy states beyond the current level to prevent stale cache
+            if self.is_private.len() > len {
+                for i in len..self.is_private.len() {
+                    self.is_private[i] = None;
+                }
+            }
 
             if preceding_len == 0 {
                 trace!(target: "trie::hash_builder", "0 or 1 state masks means we have no more elements to process");
@@ -440,10 +471,15 @@ impl HashBuilder {
             new_len,
             old_tree_mask_len = self.tree_masks.len(),
             old_hash_mask_len = self.hash_masks.len(),
-            "resizing tree/hash masks"
+            old_is_private_len = self.is_private.len(),
+            "resizing tree/hash masks and privacy vector"
         );
         self.tree_masks.resize(new_len, TrieMask::default());
         self.hash_masks.resize(new_len, TrieMask::default());
+        // Ensure privacy vector is resized to match mask lengths
+        if self.is_private.len() < new_len {
+            self.is_private.resize(new_len, None);
+        }
     }
 }
 
