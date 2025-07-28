@@ -74,7 +74,7 @@ impl ExtensionNode {
     pub const ODD_FLAG: u8 = 0x10;
 
     /// Creates a new extension node with the given key and a pointer to the child.
-    /// 
+    ///
     /// # Note
     /// Extension nodes are always public in the trie structure - they represent
     /// path compression and cannot hold private state directly.

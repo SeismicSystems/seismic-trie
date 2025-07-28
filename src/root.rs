@@ -142,9 +142,9 @@ mod ethereum {
     ///
     /// Corresponds to [geth's `deriveHash`](https://github.com/ethereum/go-ethereum/blob/6c149fd4ad063f7c24d726a73bc0546badd1bc73/core/genesis.go#L119).
     ///
-    /// Note: Account metadata (nonce, balance, code hash, storage root) is always public in Ethereum.
-    /// Privacy is handled at the storage level via the storage_root functions which support
-    /// private storage slots through the Into<FlaggedStorage> trait.
+    /// Note: Account metadata (nonce, balance, code hash, storage root) is always public in
+    /// Ethereum. Privacy is handled at the storage level via the storage_root functions which
+    /// support private storage slots through the Into<FlaggedStorage> trait.
     ///
     /// # Panics
     ///
