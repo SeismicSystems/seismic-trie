@@ -57,42 +57,14 @@ where
 pub use ethereum::*;
 #[cfg(feature = "ethereum")]
 mod ethereum {
-    use alloy_primitives::U256;
-
-    /// Trait for storage values that can be marked as public or private
-    /// Useful for making the following functions generic over the type of storage value.
-    /// to avoid breaking changes in the API for downstream repos
-    pub trait FlaggedStorageValue {
-        /// returns whether the value is private
-        fn is_private(&self) -> bool {
-            false
-        }
-        /// returns the underlying value
-        fn value(&self) -> &U256;
-    }
-
-    impl FlaggedStorageValue for U256 {
-        fn value(&self) -> &Self {
-            self
-        }
-    }
-    impl FlaggedStorageValue for (U256, bool) {
-        fn is_private(&self) -> bool {
-            self.1
-        }
-        fn value(&self) -> &U256 {
-            &self.0
-        }
-    }
-
     use super::*;
     use crate::TrieAccount;
-    use alloy_primitives::{keccak256, Address};
+    use alloy_primitives::{keccak256, Address, FlaggedStorage};
 
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
     /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root_unhashed<T: FlaggedStorageValue>(
+    pub fn storage_root_unhashed<T: Into<FlaggedStorage>>(
         storage: impl IntoIterator<Item = (B256, T)>,
     ) -> B256 {
         storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
@@ -101,7 +73,7 @@ mod ethereum {
     /// Sorts and calculates the root hash of account storage trie.
     /// See [`storage_root`] for more info.
     /// /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root_unsorted<T: FlaggedStorageValue>(
+    pub fn storage_root_unsorted<T: Into<FlaggedStorage>>(
         storage: impl IntoIterator<Item = (B256, T)>,
     ) -> B256 {
         // transform the storage keys
@@ -116,14 +88,15 @@ mod ethereum {
     ///
     /// If the items are not in sorted order.
     /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root<T: FlaggedStorageValue>(
+    pub fn storage_root<T: Into<FlaggedStorage>>(
         storage: impl IntoIterator<Item = (B256, T)>,
     ) -> B256 {
         let mut hb = HashBuilder::default();
         for (hashed_slot, value) in storage {
+            let value = value.into();
             hb.add_leaf(
                 Nibbles::unpack(hashed_slot),
-                alloy_rlp::encode_fixed_size(value.value()).as_ref(),
+                alloy_rlp::encode_fixed_size(&value.value).as_ref(),
                 value.is_private(),
             );
         }
