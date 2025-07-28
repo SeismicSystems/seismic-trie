@@ -249,7 +249,7 @@ pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool, is_private: bool) -> S
                 (false, false, false) => ExtensionNode::EVEN_FLAG,
                 (true, true, true) => LeafNode::PRIV_ODD_FLAG | *nibbles.get_unchecked(0),
                 (true, true, false) => LeafNode::PRIV_EVEN_FLAG,
-                (true, false, _) => panic!("extension node cannot be private"),
+                (true, false, _) => panic!("extension node cannot be private - they represent path compression and are always public"),
             });
             if odd_nibbles {
                 nibbles = nibbles.get_unchecked(1..);

@@ -38,7 +38,7 @@ where
                     got: None,
                     expected: expected_value.map(Bytes::from),
                     got_private: false,
-                    expected_private: true,
+                    expected_private: expected_is_private,
                 })
             }
         } else {

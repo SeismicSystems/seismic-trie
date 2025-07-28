@@ -16,15 +16,15 @@ pub const fn adjust_index_for_rlp(i: usize, len: usize) -> usize {
 }
 
 /// Compute a trie root of the collection of rlp encodable items.
-/// This function does not support private nodes.
-/// and is used for things like receipt roots rather than state roots.
+/// Since this is used for receipt/transaction roots, all items are treated as public.
+/// For state roots with privacy support, use the storage_root functions instead.
 pub fn ordered_trie_root<T: Encodable>(items: &[T]) -> B256 {
     ordered_trie_root_with_encoder(items, |item, buf| item.encode(buf))
 }
 
 /// Compute a trie root of the collection of items with a custom encoder.
-/// This function does not support private nodes.
-/// and is used for things like receipt roots rather than state roots.
+/// Since this is used for receipt/transaction roots, all items are treated as public.
+/// For state roots with privacy support, use the storage_root functions instead.
 pub fn ordered_trie_root_with_encoder<T, F>(items: &[T], mut encode: F) -> B256
 where
     F: FnMut(&T, &mut Vec<u8>),
@@ -45,7 +45,8 @@ where
         value_buffer.clear();
         encode(&items[index], &mut value_buffer);
 
-        let is_private = false; // TODO: fix
+        // Receipt/transaction roots are always public in Ethereum
+        let is_private = false;
         hb.add_leaf(Nibbles::unpack(&index_buffer), &value_buffer, is_private);
     }
 
@@ -57,33 +58,7 @@ where
 pub use ethereum::*;
 #[cfg(feature = "ethereum")]
 mod ethereum {
-    use alloy_primitives::U256;
-
-    /// Trait for storage values that can be marked as public or private
-    /// Useful for making the following functions generic over the type of storage value.
-    /// to avoid breaking changes in the API for downstream repos
-    pub trait FlaggedStorageValue {
-        /// returns whether the value is private
-        fn is_private(&self) -> bool {
-            false
-        }
-        /// returns the underlying value
-        fn value(&self) -> &U256;
-    }
-
-    impl FlaggedStorageValue for U256 {
-        fn value(&self) -> &Self {
-            self
-        }
-    }
-    impl FlaggedStorageValue for (U256, bool) {
-        fn is_private(&self) -> bool {
-            self.1
-        }
-        fn value(&self) -> &U256 {
-            &self.0
-        }
-    }
+    use alloy_primitives::FlaggedStorage;
 
     use super::*;
     use crate::TrieAccount;
@@ -92,8 +67,8 @@ mod ethereum {
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
     /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root_unhashed<T: FlaggedStorageValue>(
-        storage: impl IntoIterator<Item = (B256, T)>,
+    pub fn storage_root_unhashed<T: Into<FlaggedStorage>>(
+        storage: impl IntoIterator<Item = (B256, FlaggedStorage)>,
     ) -> B256 {
         storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
     }
@@ -101,7 +76,7 @@ mod ethereum {
     /// Sorts and calculates the root hash of account storage trie.
     /// See [`storage_root`] for more info.
     /// /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root_unsorted<T: FlaggedStorageValue>(
+    pub fn storage_root_unsorted<T: Into<FlaggedStorage>>(
         storage: impl IntoIterator<Item = (B256, T)>,
     ) -> B256 {
         // transform the storage keys
@@ -116,14 +91,15 @@ mod ethereum {
     ///
     /// If the items are not in sorted order.
     /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling
-    pub fn storage_root<T: FlaggedStorageValue>(
+    pub fn storage_root<T: Into<FlaggedStorage>>(
         storage: impl IntoIterator<Item = (B256, T)>,
     ) -> B256 {
         let mut hb = HashBuilder::default();
         for (hashed_slot, value) in storage {
+            let value = value.into();
             hb.add_leaf(
                 Nibbles::unpack(hashed_slot),
-                alloy_rlp::encode_fixed_size(value.value()).as_ref(),
+                alloy_rlp::encode_fixed_size(&value.value).as_ref(),
                 value.is_private(),
             );
         }
@@ -166,13 +142,19 @@ mod ethereum {
     ///
     /// Corresponds to [geth's `deriveHash`](https://github.com/ethereum/go-ethereum/blob/6c149fd4ad063f7c24d726a73bc0546badd1bc73/core/genesis.go#L119).
     ///
+    /// Note: Account metadata (nonce, balance, code hash, storage root) is always public in Ethereum.
+    /// Privacy is handled at the storage level via the storage_root functions which support
+    /// private storage slots through the Into<FlaggedStorage> trait.
+    ///
     /// # Panics
     ///
     /// If the items are not in sorted order.
     pub fn state_root<A: Into<TrieAccount>>(state: impl IntoIterator<Item = (B256, A)>) -> B256 {
         let mut hb = HashBuilder::default();
         let mut account_rlp_buf = Vec::new();
-        let is_private = false; // account nodes are always public
+        // Account metadata (balance, nonce, etc.) is always public in Ethereum
+        // Privacy is handled at the storage level via Into<FlaggedStorage>
+        let is_private = false;
         for (hashed_key, account) in state {
             account_rlp_buf.clear();
             account.into().encode(&mut account_rlp_buf);
