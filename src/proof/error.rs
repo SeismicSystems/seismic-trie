@@ -53,7 +53,10 @@ impl fmt::Display for ProofVerificationError {
                 write!(f, "root mismatch. got: {got}. expected: {expected}")
             }
             Self::ValueMismatch { path, got, expected, got_private, expected_private } => {
-                write!(f, "value mismatch at path {path:?}. got: {got:?}. expected: {expected:?}, got private: {got_private}, expected private: {expected_private}")
+                write!(
+                    f,
+                    "value mismatch at path {path:?}. got: {got:?}. expected: {expected:?}, got private: {got_private}, expected private: {expected_private}"
+                )
             }
             Self::UnexpectedEmptyRoot => {
                 write!(f, "unexpected empty root node")
