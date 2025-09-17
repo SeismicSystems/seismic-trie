@@ -113,7 +113,7 @@ impl Decodable for TrieNode {
                     ExtensionNode::ODD_FLAG => (Some(encoded_key[0] & 0x0f), None),
                     ExtensionNode::EVEN_FLAG => (None, None),
                     _ => {
-                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"));
+                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"))
                     }
                 };
 
