@@ -819,7 +819,7 @@ mod tests {
             let proofs = hash_builder.take_proof_nodes();
             for (key, value) in hashed {
                 let nibbles = Nibbles::unpack(key);
-                assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
+                assert_eq!(verify_proof(root, nibbles, Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
             }
         });
     }
