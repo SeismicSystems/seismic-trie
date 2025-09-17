@@ -802,25 +802,25 @@ mod tests {
         use proptest::prelude::*;
 
         proptest!(|(state: std::collections::BTreeMap<B256, alloy_primitives::U256>)| {
-                    let hashed = state.into_iter()
-                        .map(|(k, v)| (k, alloy_rlp::encode(v).to_vec()))
-                        // Collect into a btree map to sort the data
-                        .collect::<std::collections::BTreeMap<_, _>>();
+            let hashed = state.into_iter()
+                .map(|(k, v)| (k, alloy_rlp::encode(v).to_vec()))
+                // Collect into a btree map to sort the data
+                .collect::<std::collections::BTreeMap<_, _>>();
 
-                    let retainer = ProofRetainer::from_iter(hashed.clone().into_keys().map(Nibbles::unpack));
-                    let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
-                    for (key, value) in hashed.clone() {
-                        hash_builder.add_leaf(Nibbles::unpack(key), &value, false);
-                    }
+            let retainer = ProofRetainer::from_iter(hashed.clone().into_keys().map(Nibbles::unpack));
+            let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+            for (key, value) in hashed.clone() {
+                hash_builder.add_leaf(Nibbles::unpack(key), &value, false);
+            }
 
-                    let root = hash_builder.root();
-                    assert_eq!(root, triehash_trie_root(&hashed));
+            let root = hash_builder.root();
+            assert_eq!(root, triehash_trie_root(&hashed));
 
-                    let proofs = hash_builder.take_proof_nodes();
-                    for (key, value) in hashed {
-                        let nibbles = Nibbles::unpack(key);
-                        assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
-                    }
-                });
+            let proofs = hash_builder.take_proof_nodes();
+            for (key, value) in hashed {
+                let nibbles = Nibbles::unpack(key);
+                assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
+            }
+        });
     }
 }
