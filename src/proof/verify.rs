@@ -285,10 +285,7 @@ mod tests {
         let second_key = Nibbles::unpack(hex!("a77d3970"));
         let second_value = hex!("0x312e32").to_vec();
 
-        assert_eq!(
-            verify_proof(root, first_key, Some(first_value.clone()), false, &proof),
-            Ok(())
-        );
+        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), false, &proof), Ok(()));
         assert_eq!(
             verify_proof(root, first_key, None, false, &proof),
             Err(ProofVerificationError::ValueMismatch {
@@ -376,14 +373,16 @@ mod tests {
             Ok(())
         );
         // Verify private version does not exist
-        assert!(verify_proof(
-            root,
-            first_key.clone(),
-            Some(first_value.to_vec()),
-            true,
-            first_proof.iter().map(|(_, node)| node)
-        )
-        .is_err());
+        assert!(
+            verify_proof(
+                root,
+                first_key.clone(),
+                Some(first_value.to_vec()),
+                true,
+                first_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
 
         // Get proof nodes for second leaf
         let second_proof = proof.matching_nodes_sorted(&second_key);
@@ -400,14 +399,16 @@ mod tests {
             Ok(())
         );
         // verify public version does not exist
-        assert!(verify_proof(
-            root,
-            second_key.clone(),
-            Some(second_value.to_vec()),
-            false,
-            second_proof.iter().map(|(_, node)| node)
-        )
-        .is_err());
+        assert!(
+            verify_proof(
+                root,
+                second_key.clone(),
+                Some(second_value.to_vec()),
+                false,
+                second_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -818,11 +819,7 @@ mod tests {
             let proofs = hash_builder.take_proof_nodes();
             for (key, value) in hashed {
                 let nibbles = Nibbles::unpack(key);
-<<<<<<< HEAD
-                assert_eq!(verify_proof(root, nibbles.clone(), Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
-=======
-                assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
->>>>>>> 3e762bcb65f25710c309e7d8cb6c9ed7e3fdada1
+                assert_eq!(verify_proof(root, nibbles, Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
             }
         });
     }
