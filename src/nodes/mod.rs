@@ -1,7 +1,7 @@
 //! Various branch nodes produced by the hash builder.
 
-use alloy_primitives::{Bytes, B256};
-use alloy_rlp::{Decodable, Encodable, Header, EMPTY_STRING_CODE};
+use alloy_primitives::{B256, Bytes};
+use alloy_rlp::{Decodable, EMPTY_STRING_CODE, Encodable, Header};
 use core::ops::Range;
 use nybbles::Nibbles;
 use smallvec::SmallVec;
@@ -71,7 +71,7 @@ impl Decodable for TrieNode {
                     Ok(Self::EmptyRoot)
                 } else {
                     Err(alloy_rlp::Error::UnexpectedString)
-                }
+                };
             }
         };
 
@@ -171,17 +171,11 @@ pub fn word_rlp(word: &B256) -> RlpNode {
 /// `rest` - rest of the nibbles packed
 #[inline]
 pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> Nibbles {
-    let Some(first) = first else { return Nibbles::unpack(rest) };
+    let rest = Nibbles::unpack(rest);
+    let Some(first) = first else { return rest };
     debug_assert!(first <= 0xf);
-    let len = rest.len() * 2 + 1;
-    // SAFETY: `len` is calculated correctly.
-    unsafe {
-        Nibbles::from_repr_unchecked(nybbles::smallvec_with(len, |buf| {
-            let (f, r) = buf.split_first_mut().unwrap_unchecked();
-            f.write(first);
-            Nibbles::unpack_to_unchecked(rest, r);
-        }))
-    }
+    // TODO: optimize
+    Nibbles::from_nibbles_unchecked([first]).join(&rest)
 }
 
 /// Encodes a given path leaf as a compact array of bytes.
@@ -234,27 +228,24 @@ pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> Nibbles 
 /// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x3A, 0xBC]);
 /// ```
 #[inline]
-pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool, is_private: bool) -> SmallVec<[u8; 36]> {
-    let mut nibbles = nibbles.as_slice();
+pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> {
+    let mut nibbles = *nibbles;
     let encoded_len = nibbles.len() / 2 + 1;
     let odd_nibbles = nibbles.len() % 2 != 0;
     // SAFETY: `len` is calculated correctly.
     unsafe {
         nybbles::smallvec_with(encoded_len, |buf| {
             let (first, rest) = buf.split_first_mut().unwrap_unchecked();
-            first.write(match (is_private, is_leaf, odd_nibbles) {
-                (false, true, true) => LeafNode::PUB_ODD_FLAG | *nibbles.get_unchecked(0),
-                (false, true, false) => LeafNode::PUB_EVEN_FLAG,
-                (false, false, true) => ExtensionNode::ODD_FLAG | *nibbles.get_unchecked(0),
-                (false, false, false) => ExtensionNode::EVEN_FLAG,
-                (true, true, true) => LeafNode::PRIV_ODD_FLAG | *nibbles.get_unchecked(0),
-                (true, true, false) => LeafNode::PRIV_EVEN_FLAG,
-                (true, false, _) => panic!("extension node cannot be private"),
+            first.write(match (is_leaf, odd_nibbles) {
+                (true, true) => LeafNode::ODD_FLAG | nibbles.get_unchecked(0),
+                (true, false) => LeafNode::EVEN_FLAG,
+                (false, true) => ExtensionNode::ODD_FLAG | nibbles.get_unchecked(0),
+                (false, false) => ExtensionNode::EVEN_FLAG,
             });
             if odd_nibbles {
-                nibbles = nibbles.get_unchecked(1..);
+                nibbles = nibbles.slice(1..);
             }
-            nybbles::pack_to_unchecked(nibbles, rest);
+            nibbles.pack_to_slice_unchecked(rest);
         })
     }
 }
@@ -320,7 +311,7 @@ mod tests {
 
         // branch
         let branch = TrieNode::Branch(BranchNode::new(
-            core::iter::repeat(RlpNode::word_rlp(&B256::repeat_byte(23))).take(16).collect(),
+            core::iter::repeat_n(RlpNode::word_rlp(&B256::repeat_byte(23)), 16).collect(),
             TrieMask::new(u16::MAX),
         ));
         let mut rlp = vec![];
@@ -329,14 +320,21 @@ mod tests {
             rlp_node[..],
             hex!("a0bed74980bbe29d9c4439c10e9c451e29b306fe74bcf9795ecf0ebbd92a220513")
         );
-        assert_eq!(rlp, hex!("f90211a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a0171717171717171717171717171717171717171717171717171717171717171780"));
+        assert_eq!(
+            rlp,
+            hex!(
+                "f90211a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a01717171717171717171717171717171717171717171717171717171717171717a0171717171717171717171717171717171717171717171717171717171717171780"
+            )
+        );
         assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), branch);
     }
 
     #[test]
     fn hashed_encode_path_regression() {
-        let nibbles = Nibbles::from_nibbles(hex!("05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"));
-        let path = encode_path_leaf(&nibbles, true, false);
+        let nibbles = Nibbles::from_nibbles(hex!(
+            "05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"
+        ));
+        let path = encode_path_leaf(&nibbles, true);
         let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
         assert_eq!(path[..], expected);
     }
@@ -347,9 +345,9 @@ mod tests {
     fn encode_path_first_byte() {
         use proptest::{collection::vec, prelude::*};
 
-        proptest::proptest!(|(input in vec(any::<u8>(), 0..128))| {
-            let input = Nibbles::unpack(input);
-            prop_assert!(input.iter().all(|&nibble| nibble <= 0xf));
+        proptest::proptest!(|(input in vec(any::<u8>(), 0..32))| {
+            let input = Nibbles::unpack(&input);
+            prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
             let input_is_odd = input.len() % 2 == 1;
 
             let compact_leaf = encode_path_leaf(&input, true, false);
