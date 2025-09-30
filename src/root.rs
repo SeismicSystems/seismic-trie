@@ -61,6 +61,8 @@ mod ethereum {
     use crate::TrieAccount;
     use alloy_primitives::{Address, U256, keccak256};
 
+    use alloy_primitives::FlaggedStorage;
+
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
     /// SEISMIC WARNING: Ensure that the storage values are flagged correctly when calling

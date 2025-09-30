@@ -63,6 +63,7 @@ impl Default for HashBuilder {
         Self {
             key: Default::default(),
             value: Default::default(),
+            is_private: Default::default(),
             stack: Default::default(),
             state_masks: Default::default(),
             tree_masks: Default::default(),
@@ -89,6 +90,7 @@ impl<K> HashBuilder<K> {
         HashBuilder {
             key: self.key,
             value: self.value,
+            is_private: self.is_private,
             stack: self.stack,
             state_masks: self.state_masks,
             tree_masks: self.tree_masks,
@@ -530,7 +532,7 @@ mod tests {
         let data = iter.into_iter().collect::<BTreeMap<_, _>>();
         data.iter().for_each(|(key, val)| {
             let nibbles = Nibbles::unpack(key.as_ref());
-            hb.add_leaf(nibbles, val.as_ref());
+            hb.add_leaf(nibbles, val.as_ref(), false);
         });
 
         assert_eq!(hb.root(), triehash_trie_root(data));
@@ -663,7 +665,7 @@ mod tests {
         // We create the hash builder and add the leaves
         let mut hb = HashBuilder::default();
         for (key, val) in &raw_input {
-            hb.add_leaf(Nibbles::unpack(key), val);
+            hb.add_leaf(Nibbles::unpack(key), val, is_private);
         }
 
         // Manually create the branch node that should be there after the first 2 leaves are added.

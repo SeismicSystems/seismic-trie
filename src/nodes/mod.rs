@@ -113,7 +113,7 @@ impl Decodable for TrieNode {
                     ExtensionNode::ODD_FLAG => (Some(encoded_key[0] & 0x0f), None),
                     ExtensionNode::EVEN_FLAG => (None, None),
                     _ => {
-                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"))
+                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"));
                     }
                 };
 
@@ -228,7 +228,7 @@ pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> Nibbles 
 /// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x3A, 0xBC]);
 /// ```
 #[inline]
-pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> {
+pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool, is_private: bool) -> SmallVec<[u8; 36]> {
     let mut nibbles = *nibbles;
     let encoded_len = nibbles.len() / 2 + 1;
     let odd_nibbles = nibbles.len() % 2 != 0;
@@ -236,11 +236,14 @@ pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> 
     unsafe {
         nybbles::smallvec_with(encoded_len, |buf| {
             let (first, rest) = buf.split_first_mut().unwrap_unchecked();
-            first.write(match (is_leaf, odd_nibbles) {
-                (true, true) => LeafNode::ODD_FLAG | nibbles.get_unchecked(0),
-                (true, false) => LeafNode::EVEN_FLAG,
-                (false, true) => ExtensionNode::ODD_FLAG | nibbles.get_unchecked(0),
-                (false, false) => ExtensionNode::EVEN_FLAG,
+            first.write(match (is_private, is_leaf, odd_nibbles) {
+                (false, true, true) => LeafNode::PUB_ODD_FLAG | nibbles.get_unchecked(0),
+                (false, true, false) => LeafNode::PUB_EVEN_FLAG,
+                (false, false, true) => ExtensionNode::ODD_FLAG | nibbles.get_unchecked(0),
+                (false, false, false) => ExtensionNode::EVEN_FLAG,
+                (true, true, true) => LeafNode::PRIV_ODD_FLAG | nibbles.get_unchecked(0),
+                (true, true, false) => LeafNode::PRIV_EVEN_FLAG,
+                (true, false, _) => panic!("extension node cannot be private"),
             });
             if odd_nibbles {
                 nibbles = nibbles.slice(1..);
@@ -334,7 +337,7 @@ mod tests {
         let nibbles = Nibbles::from_nibbles(hex!(
             "05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"
         ));
-        let path = encode_path_leaf(&nibbles, true);
+        let path = encode_path_leaf(&nibbles, true, false);
         let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
         assert_eq!(path[..], expected);
     }

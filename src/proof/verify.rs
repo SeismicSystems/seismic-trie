@@ -138,6 +138,7 @@ fn process_trie_node(
         }
         TrieNode::Leaf(leaf) => {
             walked_path.extend(&leaf.key);
+            *last_decoded_node_is_private = leaf.is_private;
             Some(NodeDecodingResult::Value(leaf.value))
         }
         TrieNode::EmptyRoot => return Err(ProofVerificationError::UnexpectedEmptyRoot),
@@ -240,7 +241,13 @@ mod tests {
             ProofNodes::from_iter([(Nibbles::default(), Bytes::from([EMPTY_STRING_CODE]))])
         );
         assert_eq!(
-            verify_proof(root, key, None, proof.into_nodes_sorted().iter().map(|(_, node)| node)),
+            verify_proof(
+                root,
+                key,
+                None,
+                empty_is_private,
+                proof.into_nodes_sorted().iter().map(|(_, node)| node),
+            ),
             Ok(())
         );
 
@@ -278,9 +285,9 @@ mod tests {
         let second_key = Nibbles::unpack(hex!("a77d3970"));
         let second_value = hex!("0x312e32").to_vec();
 
-        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), &proof), Ok(()));
+        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), false, &proof), Ok(()));
         assert_eq!(
-            verify_proof(root, first_key, None, &proof),
+            verify_proof(root, first_key, None, false, &proof),
             Err(ProofVerificationError::ValueMismatch {
                 path: first_key,
                 got: Some(first_value.into()),
@@ -290,9 +297,12 @@ mod tests {
             })
         );
 
-        assert_eq!(verify_proof(root, second_key, Some(second_value.clone()), &proof), Ok(()));
         assert_eq!(
-            verify_proof(root, second_key, None, &proof),
+            verify_proof(root, second_key, Some(second_value.clone()), false, &proof),
+            Ok(())
+        );
+        assert_eq!(
+            verify_proof(root, second_key, None, false, &proof),
             Err(ProofVerificationError::ValueMismatch {
                 path: second_key,
                 got: Some(second_value.into()),
@@ -312,7 +322,7 @@ mod tests {
 
         let retainer = ProofRetainer::from_iter([target, non_existent_target]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
-        hash_builder.add_leaf(target, &target_value[..]);
+        hash_builder.add_leaf(target, &target_value[..], is_private);
         let root = hash_builder.root();
         assert_eq!(root, triehash_trie_root([(target.pack(), target.pack())]));
 
@@ -363,14 +373,16 @@ mod tests {
             Ok(())
         );
         // Verify private version does not exist
-        assert!(verify_proof(
-            root,
-            first_key.clone(),
-            Some(first_value.to_vec()),
-            true,
-            first_proof.iter().map(|(_, node)| node)
-        )
-        .is_err());
+        assert!(
+            verify_proof(
+                root,
+                first_key.clone(),
+                Some(first_value.to_vec()),
+                true,
+                first_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
 
         // Get proof nodes for second leaf
         let second_proof = proof.matching_nodes_sorted(&second_key);
@@ -387,14 +399,16 @@ mod tests {
             Ok(())
         );
         // verify public version does not exist
-        assert!(verify_proof(
-            root,
-            second_key.clone(),
-            Some(second_value.to_vec()),
-            false,
-            second_proof.iter().map(|(_, node)| node)
-        )
-        .is_err());
+        assert!(
+            verify_proof(
+                root,
+                second_key.clone(),
+                Some(second_value.to_vec()),
+                false,
+                second_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -470,7 +484,7 @@ mod tests {
         for key in &existing_keys {
             hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
         }
-        hash_builder.add_leaf(target, &value[..]);
+        hash_builder.add_leaf(target, &value[..], false);
         let root = hash_builder.root();
         assert_eq!(
             root,
@@ -805,7 +819,7 @@ mod tests {
             let proofs = hash_builder.take_proof_nodes();
             for (key, value) in hashed {
                 let nibbles = Nibbles::unpack(key);
-                assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
+                assert_eq!(verify_proof(root, nibbles, Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
             }
         });
     }
