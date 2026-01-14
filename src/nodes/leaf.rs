@@ -201,6 +201,7 @@ mod tests {
     fn rlp_leaf_node_roundtrip() {
         // Public leaf node
         let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        println!("nibble: {:?}", nibble);
         let val = hex!("76657262");
 
         let leaf = LeafNode::new(nibble.clone(), val.to_vec(), false);
