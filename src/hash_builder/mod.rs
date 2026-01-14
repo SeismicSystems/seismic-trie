@@ -538,6 +538,14 @@ mod tests {
         assert_eq!(hb.root(), triehash_trie_root(data));
     }
 
+    fn build_trie_root(state: &BTreeMap<B256, (Vec<u8>, bool)>) -> B256 {
+        let mut hb = HashBuilder::default();
+        for (key, (value, is_private)) in state {
+            hb.add_leaf(Nibbles::unpack(key), &value, *is_private);
+        }
+        hb.root()
+    }
+
     #[test]
     fn empty() {
         assert_eq!(HashBuilder::default().root(), EMPTY_ROOT_HASH);
@@ -550,6 +558,27 @@ mod tests {
         use proptest::prelude::*;
         proptest!(|(state: BTreeMap<B256, U256>)| {
             assert_hashed_trie_root(state.iter());
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_determinstic_roots() {
+        use proptest::prelude::*;
+        proptest!(|(entries in prop::collection::vec(
+            (any::<B256>(), any::<U256>(), any::<bool>()),
+            1..30
+        ))| {
+            let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
+            for (key, value, is_private) in &entries {
+                state.insert(*key, (alloy_rlp::encode(value).to_vec(), *is_private));
+            }
+            let root1 = build_trie_root(&state);
+            let root2 = build_trie_root(&state);
+            let root3 = build_trie_root(&state);
+            assert_eq!(root1, root2, "roots must be determinstic");
+            assert_eq!(root2, root3, "roots must be determinstic");
         });
     }
 
