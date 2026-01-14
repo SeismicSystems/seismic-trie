@@ -564,7 +564,7 @@ mod tests {
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
-    fn prop_determinstic_roots() {
+    fn prop_deterministic_roots() {
         use proptest::prelude::*;
         proptest!(|(entries in prop::collection::vec(
             (any::<B256>(), any::<U256>(), any::<bool>()),
