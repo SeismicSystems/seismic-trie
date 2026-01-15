@@ -583,6 +583,43 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_privacy_flag_changes_root() {
+        use proptest::prelude::*;
+
+        proptest!(|(entries in prop::collection::vec(
+            (any::<B256>(), any::<U256>()),
+            1..30
+        ))| {
+            let state: BTreeMap<B256, Vec<u8>> = entries
+                .into_iter()
+                .map(|(k, v)| (k, alloy_rlp::encode(v).to_vec()))
+                .collect();
+
+            // Build trie with all public leaves
+            let mut hb_public = HashBuilder::default();
+            for (key, value) in &state {
+                hb_public.add_leaf(Nibbles::unpack(key), value, false);
+            }
+            let public_root = hb_public.root();
+
+            // Build trie with all private leaves
+            let mut hb_private = HashBuilder::default();
+            for (key, value) in &state {
+                hb_private.add_leaf(Nibbles::unpack(key), value, true);
+            }
+            let private_root = hb_private.root();
+
+            prop_assert_ne!(
+                public_root,
+                private_root,
+                "Public and private roots must differ for same data"
+            );
+        });
+    }
+
+    #[test]
     fn test_generates_branch_node() {
         let mut hb = HashBuilder::default().with_updates(true);
 
@@ -835,5 +872,70 @@ mod tests {
         });
         assert_ne!(root, hb_all_pub.root());
         assert_ne!(root, hb_all_priv.root());
+    }
+
+    #[test]
+    fn test_zero_value_private() {
+        let key = B256::repeat_byte(0xAB);
+        let zero_value = alloy_rlp::encode(U256::ZERO).to_vec();
+
+        // Build with public zero value
+        let mut hb_pub = HashBuilder::default();
+        hb_pub.add_leaf(Nibbles::unpack(key), &zero_value, false);
+        let public_root = hb_pub.root();
+
+        // Build with private zero value
+        let mut hb_priv = HashBuilder::default();
+        hb_priv.add_leaf(Nibbles::unpack(key), &zero_value, true);
+        let private_root = hb_priv.root();
+
+        assert_ne!(public_root, private_root, "Zero value roots must differ based on privacy flag");
+    }
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_privacy_transition_changes_root() {
+        use proptest::prelude::*;
+
+        proptest!(|(
+            entries in prop::collection::vec(
+                (any::<B256>(), any::<U256>()),
+                2..20
+            ),
+            flip_index in any::<prop::sample::Index>()
+        )| {
+
+            let state: Vec<(B256, Vec<u8>)> = entries
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .map(|(k, v)| (k, alloy_rlp::encode(v).to_vec()))
+                .collect();
+
+            let flip_idx = flip_index.index(state.len());
+
+            // Build all public trie
+            let mut hb_all_public = HashBuilder::default();
+            for (key, value) in &state {
+                hb_all_public.add_leaf(Nibbles::unpack(key), value, false);
+            }
+            let all_public_root = hb_all_public.root();
+
+            // Build trie with one leaf private at flip_idx
+            let mut hb_one_private = HashBuilder::default();
+            for (i, (key, value)) in state.iter().enumerate() {
+                let is_private = i == flip_idx;
+                hb_one_private.add_leaf(Nibbles::unpack(key), value, is_private);
+            }
+            let one_private_root = hb_one_private.root();
+
+            prop_assert_ne!(
+                all_public_root,
+                one_private_root,
+                "Flipping entry {} to private must change root",
+                flip_idx
+            );
+        });
     }
 }
