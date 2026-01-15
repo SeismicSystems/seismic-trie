@@ -372,4 +372,50 @@ mod tests {
             }
         });
     }
+
+    /// Verifies private leaf hex-prefix encoding sets bit 6 (mask 0x40).
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn encode_path_first_byte_private() {
+        use proptest::{collection::vec, prelude::*};
+
+        proptest::proptest!(|(input in vec(any::<u8>(), 0..32))| {
+            let input = Nibbles::unpack(&input);
+            prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
+
+            let input_is_odd = input.len() % 2 == 1;
+            let compact_priv_leaf = encode_path_leaf(&input, true, true);
+            let priv_flag = compact_priv_leaf[0];
+
+            // Flag byte layout: `0bPLOx_xxxx` where P=private, L=leaf, O=odd parity.
+
+            // Bit 6 (private), bit 5 (leaf) must be set
+            prop_assert_ne!(priv_flag & 0x40, 0, "Private bit should be set");
+            prop_assert_ne!(priv_flag & 0x20, 0, "Leaf bit should be set");
+
+            // Bit 4 (odd) must match path parity
+            let has_odd_bit = (priv_flag & 0x10) != 0;
+            prop_assert_eq!(has_odd_bit, input_is_odd, "Odd bit should match parity");
+
+            // For odd paths, first nibble is packed into lower 4 bits
+            if input_is_odd {
+                prop_assert_eq!(
+                    priv_flag & 0x0f,
+                    input.first().unwrap(),
+                    "Lower nibble should contain first path nibble for odd paths"
+                );
+            }
+
+            // Private vs public must differ by exactly bit 6
+            let compact_pub_leaf = encode_path_leaf(&input, true, false);
+            let pub_flag = compact_pub_leaf[0];
+            prop_assert_eq!(
+                priv_flag ^ pub_flag,
+                0x40,
+                "Private and public flags should differ by exactly 0x40"
+            );
+        });
+    }
 }

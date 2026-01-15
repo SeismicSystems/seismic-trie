@@ -823,4 +823,56 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_mixed_privacy_proof_verification() {
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        proptest!(|(
+            entries in prop::collection::vec(
+                (any::<B256>(), any::<alloy_primitives::U256>(), any::<bool>()),
+                1..20
+            )
+        )| {
+            let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
+            for (key, value, is_private) in &entries {
+                state.insert(*key, (alloy_rlp::encode(value).to_vec(), *is_private));
+            }
+
+            let keys: Vec<Nibbles> = state.keys().map(|k| Nibbles::unpack(*k)).collect();
+            let retainer = ProofRetainer::from_iter(keys);
+            let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+            for (key, (value, is_private)) in &state {
+                hash_builder.add_leaf(Nibbles::unpack(*key), value, *is_private);
+            }
+            let root = hash_builder.root();
+            let proofs = hash_builder.take_proof_nodes();
+
+            for (key, (value, is_private)) in &state {
+                let nibbles = Nibbles::unpack(*key);
+                let proof_nodes = proofs.matching_nodes_sorted(&nibbles);
+
+                let correct = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    *is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(correct.is_ok(), "Correct privacy flag should verify: {:?}", correct);
+
+                let wrong = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    !is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
+            }
+        });
+    }
 }
