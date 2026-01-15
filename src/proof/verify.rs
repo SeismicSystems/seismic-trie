@@ -855,30 +855,23 @@ mod tests {
                 let nibbles = Nibbles::unpack(*key);
                 let proof_nodes = proofs.matching_nodes_sorted(&nibbles);
 
-                let result = verify_proof(
+                let correct = verify_proof(
                     root,
                     nibbles,
                     Some(value.clone()),
                     *is_private,
                     proof_nodes.iter().map(|(_, node)| node),
                 );
-                prop_assert!(
-                    result.is_ok(),
-                    "Proof with correct privacy flag should verify: {:?}",
-                    result
-                );
+                prop_assert!(correct.is_ok(), "Correct privacy flag should verify: {:?}", correct);
 
-                let wrong_result = verify_proof(
+                let wrong = verify_proof(
                     root,
                     nibbles,
                     Some(value.clone()),
-                    !is_private, // Flipped!
+                    !is_private,
                     proof_nodes.iter().map(|(_, node)| node),
                 );
-                prop_assert!(
-                    wrong_result.is_err(),
-                    "Proof with wrong privacy flag MUST fail, but got Ok"
-                );
+                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
             }
         });
     }

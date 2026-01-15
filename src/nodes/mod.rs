@@ -373,13 +373,8 @@ mod tests {
         });
     }
 
-    /// The hex prefix flags for leaves are:
-    /// - 0x20 = public even (0010_0000)
-    /// - 0x30 = public odd  (0011_0000)
-    /// - 0x60 = private even (0110_0000)
-    /// - 0x70 = private odd  (0111_0000)
-    ///
-    /// Bit 6 (mask 0x40) distinguishes private from public.
+    /// Verifies private leaf hex-prefix encoding sets bit 6 (mask 0x40).
+
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
@@ -387,73 +382,35 @@ mod tests {
         use proptest::{collection::vec, prelude::*};
 
         proptest::proptest!(|(input in vec(any::<u8>(), 0..32))| {
-            // Each byte becomes 2 nibbles: [0xAB, 0xCD] -> [0xA, 0xB, 0xC, 0xD]
-            // This simulates any possible MPT path.
             let input = Nibbles::unpack(&input);
-
             prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
 
-            // Record path parity
-            // Odd vs even path length affects the flag byte encoding.
             let input_is_odd = input.len() % 2 == 1;
-
-            // Encode as a private leaf
             let compact_priv_leaf = encode_path_leaf(&input, true, true);
             let priv_flag = compact_priv_leaf[0];
 
-            // Verify bit 6 is set (mask 0x40)
-            //   priv_flag = 0110_0000 (0x60, private even leaf)
-            //        0x40 = 0100_0000
-            //               ─────────
-            //   AND result = 0100_0000 != 0
-            prop_assert_ne!(priv_flag & 0x40, 0, "Private bit should be set");
+            // Flag byte layout: `0bPLOx_xxxx` where P=private, L=leaf, O=odd parity.
 
-            // Verify bit 5 is set (mask 0x20)
-            //   priv_flag = 0110_0000
-            //        0x20 = 0010_0000
-            //               ─────────
-            //   AND result = 0010_0000 != 0
+            // Bit 6 (private), bit 5 (leaf) must be set
+            prop_assert_ne!(priv_flag & 0x40, 0, "Private bit should be set");
             prop_assert_ne!(priv_flag & 0x20, 0, "Leaf bit should be set");
 
-            // Verify bit 4 (mask 0x10) matches path parity
-            // If path has odd number of nibbles, bit 4 = 1; otherwise bit 4 = 0.
-            //
-            //   For odd path:  priv_flag = 0111_0000 (0x70)
-            //   For even path: priv_flag = 0110_0000 (0x60)
+            // Bit 4 (odd) must match path parity
             let has_odd_bit = (priv_flag & 0x10) != 0;
             prop_assert_eq!(has_odd_bit, input_is_odd, "Odd bit should match parity");
 
-            // For ODD paths, verify first nibble is in lower 4 bits (mask 0x0f)
-            // Hex-prefix encoding stores the first nibble in bits 0-3 for odd paths.
-            // This avoids wasting a full byte for a single nibble.
-            //
-            //   Path [0xA, 0xB, 0xC] (odd, 3 nibbles):
-            //   flag byte = 0x7A
-            //               ││└─ 0xA = first nibble stored here
-            //               │└── bit 4 (mask 0x10) = odd bit
-            //               └─── bits 5-6 (mask 0x60) = private + leaf bits
+            // For odd paths, first nibble is packed into lower 4 bits
             if input_is_odd {
                 prop_assert_eq!(
-                    priv_flag & 0x0f,  // Isolate lower 4 bits
+                    priv_flag & 0x0f,
                     input.first().unwrap(),
                     "Lower nibble should contain first path nibble for odd paths"
                 );
             }
 
-            // Compare with public encoding
+            // Private vs public must differ by exactly bit 6
             let compact_pub_leaf = encode_path_leaf(&input, true, false);
             let pub_flag = compact_pub_leaf[0];
-
-            // XOR reveals which bits differ between private and public.
-            // The ONLY difference should be bit 6 (mask 0x40).
-            //
-            //   priv_flag = 0110_0000 (mask 0x60)
-            //    pub_flag = 0010_0000 (mask 0x20)
-            //               ─────────
-            //   XOR result = 0100_0000 = 0x40
-            //
-            // This proves private encoding is identical to public except for
-            // the privacy bit — no other bits are accidentally modified.
             prop_assert_eq!(
                 priv_flag ^ pub_flag,
                 0x40,
