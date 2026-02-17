@@ -193,12 +193,7 @@ Configured in `rustfmt.toml`, `clippy.toml`, and `Cargo.toml [lints]`:
 
 ## CI
 
-GitHub Actions in `.github/workflows/`:
-
-- **seismic.yml** (runs on `seismic` branch): `rustfmt` (nightly), `cargo build`, `RUSTFLAGS="-D warnings" cargo check`, `cargo test`
-- **ci.yml** (upstream, runs on `main`): matrix across stable/beta/nightly/MSRV, feature powerset, miri, clippy, docs
-- **no_std.yml** (upstream): `cargo check --target riscv32imac-unknown-none-elf --no-default-features`
-- **bench.yml** (upstream): CodSpeed benchmarks
+GitHub Actions in `.github/workflows/seismic.yml` (runs on `seismic` branch): `rustfmt` (nightly), `cargo build`, `RUSTFLAGS="-D warnings" cargo check`, `cargo test`
 
 ## Branches
 
