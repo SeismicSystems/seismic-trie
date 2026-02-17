@@ -1047,7 +1047,6 @@ mod tests {
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
-    #[should_panic(expected = "Correct privacy flag should verify")]
     fn prop_short_keys_verification_fails_when_root_small() {
         use proptest::prelude::*;
         use std::collections::BTreeMap;
