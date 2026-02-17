@@ -1004,4 +1004,71 @@ mod tests {
             }
         });
     }
+
+    /// Property test specifically targeting in-place encoded nodes with privacy flags.
+    ///
+    /// In-place encoding occurs when RLP-encoded nodes are < 32 bytes. This test uses
+    /// small values (0-0xFFFFFF) that will definitely encode in-place, ensuring we
+    /// exercise the code path where privacy flags are extracted from in-place leaf nodes.
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_private_inplace_proof_verification() {
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        // Values that will definitely encode in-place (< 32 bytes RLP).
+        // Stratified sampling to cover different in-place sizes:
+        let inplace_value = prop_oneof![
+            // 1 byte RLP (values 0-127)
+            Just(alloy_primitives::U256::ZERO),
+            (1u8..=127).prop_map(alloy_primitives::U256::from),
+            // 2-4 byte RLP (values 128 - 0xFFFFFF)
+            (128u32..=0xFFFFFF).prop_map(alloy_primitives::U256::from),
+        ];
+
+        proptest!(|(
+            entries in prop::collection::vec(
+                (any::<B256>(), inplace_value, any::<bool>()),
+                2..15  // Smaller count to increase chance of in-place branch nodes
+            )
+        )| {
+            let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
+            for (key, value, is_private) in &entries {
+                state.insert(*key, (alloy_rlp::encode(value).to_vec(), *is_private));
+            }
+
+            let keys: Vec<Nibbles> = state.keys().map(|k| Nibbles::unpack(*k)).collect();
+            let retainer = ProofRetainer::from_iter(keys);
+            let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+            for (key, (value, is_private)) in &state {
+                hash_builder.add_leaf(Nibbles::unpack(*key), value, *is_private);
+            }
+            let root = hash_builder.root();
+            let proofs = hash_builder.take_proof_nodes();
+
+            for (key, (value, is_private)) in &state {
+                let nibbles = Nibbles::unpack(*key);
+                let proof_nodes = proofs.matching_nodes_sorted(&nibbles);
+
+                let correct = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    *is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(correct.is_ok(), "Correct privacy flag should verify for in-place node: {:?}", correct);
+
+                let wrong = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    !is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail for in-place node");
+            }
+        });
+    }
 }
