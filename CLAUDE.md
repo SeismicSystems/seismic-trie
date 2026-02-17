@@ -6,7 +6,7 @@ Fork of [alloy-rs/trie](https://github.com/alloy-rs/trie) that extends the Merkl
 
 Ethereum's MPT is used to compute state roots and generate Merkle proofs. This fork adds:
 
-- **Private leaf nodes** — `LeafNode` carries an `is_private: bool` flag, encoded as `0x30`/`0x31` (private) vs `0x20`/`0x21` (public) in the first nibble byte
+- **Private leaf nodes** — `LeafNode` carries an `is_private: bool` flag, encoded via bit 6 of the first nibble byte: public `0x20`/`0x30` vs private `0x60`/`0x70` (see encoding details below)
 - **Flagged storage integration** — uses `FlaggedStorage<V>` from the Seismic fork of `alloy-primitives` to pair values with privacy flags
 - **Privacy-aware proof verification** — `verify_proof()` handles private nodes during inclusion and exclusion proofs
 - **Privacy-aware hash building** — `HashBuilder` tracks `is_private` per leaf, producing different roots when privacy flags change
@@ -36,13 +36,6 @@ rustup toolchain install stable
 
 # Build
 cargo build
-```
-
-### Verify
-
-```bash
-cargo build 2>&1 | tail -1
-# Expected: Finished `dev` profile [unoptimized + debuginfo] target(s) in ...
 ```
 
 ## Test
@@ -128,12 +121,55 @@ src/
 
 ## Key Seismic Modifications
 
-Privacy support is threaded through:
+Privacy support is threaded through the entire trie: leaf encoding → hash building → proof verification → storage root computation.
 
-- **Leaf encoding**: `src/nodes/leaf.rs` — `is_private` flag encoded in first nibble byte (`0x30`/`0x31` for private, `0x20`/`0x21` for public)
-- **Hash building**: `src/hash_builder/mod.rs` — `HashBuilder.is_private` tracks flag per leaf; `add_leaf(key, value, is_private)` API
-- **Proof verification**: `src/proof/verify.rs` — handles private leaf nodes in inclusion/exclusion proofs
-- **Dependency patch**: `Cargo.toml [patch.crates-io]` — points `alloy-primitives` to SeismicSystems fork with `seismic` feature (provides `FlaggedStorage`)
+### Leaf encoding (`src/nodes/leaf.rs`, `src/nodes/mod.rs`)
+
+`LeafNode` has an `is_private: bool` field. The privacy flag is encoded in the first nibble byte using bit layout `0bPLOx_xxxx`:
+- **P** (bit 6) = private flag
+- **L** (bit 5) = leaf flag (always 1 for leaves)
+- **O** (bit 4) = odd nibble count
+
+Four constants on `LeafNode`:
+| Constant | Value | Meaning |
+|---|---|---|
+| `PUB_EVEN_FLAG` | `0x20` | Public leaf, even nibbles |
+| `PUB_ODD_FLAG` | `0x30` | Public leaf, odd nibbles |
+| `PRIV_EVEN_FLAG` | `0x60` | Private leaf, even nibbles |
+| `PRIV_ODD_FLAG` | `0x70` | Private leaf, odd nibbles |
+
+Private differs from public by exactly bit 6 (`0x40`). Extension nodes use `0x00`/`0x10` (unchanged from upstream).
+
+`encode_path_leaf(nibbles, is_leaf, is_private)` — third parameter is new. **Panics** if `is_private=true` for extension nodes.
+
+### Hash building (`src/hash_builder/mod.rs`)
+
+- `HashBuilder` has a new `is_private: Option<bool>` field tracking the current leaf's flag
+- `add_leaf(key, value, is_private)` — third parameter is new
+- The privacy flag flows into `LeafNodeRef` construction during hashing, so different `is_private` values produce different trie roots even for identical key/value data
+
+### Proof verification (`src/proof/verify.rs`, `src/proof/error.rs`)
+
+- `verify_proof(root, key, expected_value, expected_is_private, proof)` — fourth parameter is new
+- Tracks `last_decoded_node_is_private` through proof traversal
+- Final check validates both value **and** privacy flag match
+- `ProofVerificationError::ValueMismatch` now includes `got_private: bool` and `expected_private: bool` fields
+
+### Storage root functions (`src/root.rs`)
+
+- `storage_root()`, `storage_root_unhashed()`, `storage_root_unsorted()` now accept `T: Into<FlaggedStorage>` (from seismic-alloy-core) and extract `.value` and `.is_private()` to pass through to `add_leaf()`
+- `state_root()` always uses `is_private = false` — account nodes are always public
+
+### Important invariants
+
+- **Extension nodes are always public** — `encode_path_leaf` panics if private
+- **Account nodes are always public** — `state_root()` hardcodes `is_private = false`
+- **`ordered_trie_root()` doesn't support private nodes** — `src/root.rs:48` has `let is_private = false; // TODO: fix` (used for receipt roots, not state)
+
+### Dependency patch (`Cargo.toml`)
+
+- `[patch.crates-io]` points `alloy-primitives` to SeismicSystems fork of alloy-core
+- `alloy-primitives` features include `"seismic"` which provides the `FlaggedStorage` type
 
 ## Code Style
 
