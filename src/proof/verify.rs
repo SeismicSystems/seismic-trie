@@ -1005,32 +1005,29 @@ mod tests {
         });
     }
 
-    /// Property test specifically targeting in-place encoded nodes with privacy flags.
+    /// Property test for small storage values with privacy flags.
     ///
-    /// In-place encoding occurs when RLP-encoded nodes are < 32 bytes. This test uses
-    /// small values (0-0xFFFFFF) that will definitely encode in-place, ensuring we
-    /// exercise the code path where privacy flags are extracted from in-place leaf nodes.
+    /// Note: With B256 keys (64 nibbles), leaves are ~36+ bytes due to path encoding,
+    /// so in-place encoding does not occur here. For true in-place coverage, see the
+    /// unit test `private_inplace_leaf_proof_verification` which uses short keys.
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
-    fn prop_private_inplace_proof_verification() {
+    fn prop_private_small_value_proof_verification() {
         use proptest::prelude::*;
         use std::collections::BTreeMap;
 
-        // Values that will definitely encode in-place (< 32 bytes RLP).
-        // Stratified sampling to cover different in-place sizes:
-        let inplace_value = prop_oneof![
-            // 1 byte RLP (values 0-127)
+        // Small values to complement existing tests that skew toward large U256
+        let small_value = prop_oneof![
             Just(alloy_primitives::U256::ZERO),
             (1u8..=127).prop_map(alloy_primitives::U256::from),
-            // 2-4 byte RLP (values 128 - 0xFFFFFF)
             (128u32..=0xFFFFFF).prop_map(alloy_primitives::U256::from),
         ];
 
         proptest!(|(
             entries in prop::collection::vec(
-                (any::<B256>(), inplace_value, any::<bool>()),
-                2..15  // Smaller count to increase chance of in-place branch nodes
+                (any::<B256>(), small_value, any::<bool>()),
+                2..20
             )
         )| {
             let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
@@ -1058,7 +1055,7 @@ mod tests {
                     *is_private,
                     proof_nodes.iter().map(|(_, node)| node),
                 );
-                prop_assert!(correct.is_ok(), "Correct privacy flag should verify for in-place node: {:?}", correct);
+                prop_assert!(correct.is_ok(), "Correct privacy flag should verify: {:?}", correct);
 
                 let wrong = verify_proof(
                     root,
@@ -1067,7 +1064,7 @@ mod tests {
                     !is_private,
                     proof_nodes.iter().map(|(_, node)| node),
                 );
-                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail for in-place node");
+                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
             }
         });
     }
