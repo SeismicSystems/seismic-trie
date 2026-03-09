@@ -227,7 +227,9 @@ fn process_branch(
                                     node @ (TrieNode::EmptyRoot
                                     | TrieNode::Extension(_)
                                     | TrieNode::Leaf(_)) => {
-                                        unreachable!("unexpected extension node child: {node:?}")
+                                        return Err(ProofVerificationError::UnexpectedNodeChild(
+                                            alloc::format!("{node:?}"),
+                                        ));
                                     }
                                 }
                             }
