@@ -27,6 +27,8 @@ pub enum ProofVerificationError {
     },
     /// Encountered unexpected empty root node.
     UnexpectedEmptyRoot,
+    /// Proof contains trailing nodes after the expected end.
+    TrailingProofNodes,
     /// Error during RLP decoding of trie node.
     Rlp(alloy_rlp::Error),
 }
@@ -60,6 +62,9 @@ impl fmt::Display for ProofVerificationError {
             }
             Self::UnexpectedEmptyRoot => {
                 write!(f, "unexpected empty root node")
+            }
+            Self::TrailingProofNodes => {
+                write!(f, "proof contains trailing nodes after the expected end")
             }
             Self::Rlp(error) => fmt::Display::fmt(error, f),
         }

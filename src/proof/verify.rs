@@ -29,6 +29,11 @@ where
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
     if proof.peek().is_none_or(|node| node.as_ref() == [EMPTY_STRING_CODE]) {
+        // Consume the first element (if any), then ensure no trailing nodes remain.
+        proof.next();
+        if proof.next().is_some() {
+            return Err(ProofVerificationError::TrailingProofNodes);
+        }
         return if root == EMPTY_ROOT_HASH {
             if expected_value.is_none() {
                 Ok(())
