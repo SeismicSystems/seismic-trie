@@ -27,6 +27,9 @@ pub enum ProofVerificationError {
     },
     /// Encountered unexpected empty root node.
     UnexpectedEmptyRoot,
+    /// Encountered an unexpected child node type (e.g., Leaf, Extension, or EmptyRoot)
+    /// inside an inline extension node where only a Branch is valid.
+    UnexpectedNodeChild(alloc::string::String),
     /// Error during RLP decoding of trie node.
     Rlp(alloy_rlp::Error),
 }
@@ -60,6 +63,9 @@ impl fmt::Display for ProofVerificationError {
             }
             Self::UnexpectedEmptyRoot => {
                 write!(f, "unexpected empty root node")
+            }
+            Self::UnexpectedNodeChild(msg) => {
+                write!(f, "unexpected node child: {msg}")
             }
             Self::Rlp(error) => fmt::Display::fmt(error, f),
         }
