@@ -38,7 +38,7 @@ where
                     got: None,
                     expected: expected_value.map(Bytes::from),
                     got_private: false,
-                    expected_private: true,
+                    expected_private: expected_is_private,
                 })
             }
         } else {
@@ -808,7 +808,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn private_inplace_leaf_proof_verification() {
         // Same trie structure as proof_verification_with_node_encoded_in_place,
         // but the in-place leaf at nibble 0x2 is marked private.
