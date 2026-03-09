@@ -37,6 +37,16 @@ pub fn verify_proof<'a, I>(
 where
     I: IntoIterator<Item = &'a Bytes>,
 {
+    let proof: Vec<&'a Bytes> = proof.into_iter().collect();
+
+    // Enforce maximum proof node count.
+    if proof.len() > MAX_PROOF_NODES {
+        return Err(ProofVerificationError::TooManyProofNodes {
+            got: proof.len(),
+            max: MAX_PROOF_NODES,
+        });
+    }
+
     let mut proof = proof.into_iter().peekable();
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
@@ -67,6 +77,13 @@ where
     let mut last_decoded_node = Some(NodeDecodingResult::Node(RlpNode::word_rlp(&root)));
     let mut last_decoded_node_is_private = false;
     for node in proof {
+        // Enforce maximum proof node size.
+        if node.len() > MAX_PROOF_NODE_SIZE {
+            return Err(ProofVerificationError::ProofNodeTooLarge {
+                got: node.len(),
+                max: MAX_PROOF_NODE_SIZE,
+            });
+        }
         // Check if the node that we just decoded (or root node, if we just started) matches
         // the expected node from the proof.
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
