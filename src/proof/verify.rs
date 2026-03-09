@@ -795,6 +795,36 @@ mod tests {
         .unwrap();
     }
 
+    /// Regression test for audit finding: malicious proof with an inline extension node
+    /// whose child is a leaf (not a branch) should return an error instead of panicking.
+    #[test]
+    fn malicious_proof_unexpected_extension_child_returns_error() {
+        let leaf = LeafNode::new(Nibbles::from_nibbles([0x2]), vec![0x01], false);
+        let mut leaf_rlp = Vec::new();
+        let leaf_node = leaf.as_ref().rlp(&mut leaf_rlp);
+
+        let extension = ExtensionNode::new(Nibbles::from_nibbles([0x1]), leaf_node);
+        let mut extension_rlp = Vec::new();
+        let extension_node = extension.as_ref().rlp(&mut extension_rlp);
+        assert!(extension_rlp.len() < 32, "extension node should be inline");
+
+        let other_child = RlpNode::word_rlp(&B256::repeat_byte(0x11));
+        let state_mask = TrieMask::from_nibble(0) | TrieMask::from_nibble(1);
+        let branch = BranchNode::new(vec![extension_node, other_child], state_mask);
+
+        let mut branch_rlp = Vec::new();
+        branch.as_ref().rlp(&mut branch_rlp);
+        assert!(branch_rlp.len() >= 32, "branch node should be hashed at root");
+
+        let root = alloy_primitives::keccak256(&branch_rlp);
+        let proof = vec![Bytes::from(branch_rlp)];
+        let key = Nibbles::from_nibbles([0x0]);
+
+        // Before the fix, this would panic with `unreachable!` instead of returning an error.
+        let result = verify_proof(root, key, None, false, proof.iter());
+        assert!(result.is_err(), "should return error, not panic");
+    }
+
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
