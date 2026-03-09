@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 mod verify;
-pub use verify::verify_proof;
+pub use verify::{MAX_PROOF_NODES, MAX_PROOF_NODE_SIZE, verify_proof};
 
 mod error;
 pub use error::ProofVerificationError;

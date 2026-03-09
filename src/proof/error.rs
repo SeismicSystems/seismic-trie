@@ -27,6 +27,20 @@ pub enum ProofVerificationError {
     },
     /// Encountered unexpected empty root node.
     UnexpectedEmptyRoot,
+    /// Individual proof node exceeds the maximum allowed size.
+    ProofNodeTooLarge {
+        /// The size of the oversized node.
+        got: usize,
+        /// The maximum allowed size.
+        max: usize,
+    },
+    /// The proof contains more nodes than allowed.
+    TooManyProofNodes {
+        /// The number of nodes in the proof.
+        got: usize,
+        /// The maximum allowed number of nodes.
+        max: usize,
+    },
     /// Error during RLP decoding of trie node.
     Rlp(alloy_rlp::Error),
 }
@@ -60,6 +74,12 @@ impl fmt::Display for ProofVerificationError {
             }
             Self::UnexpectedEmptyRoot => {
                 write!(f, "unexpected empty root node")
+            }
+            Self::ProofNodeTooLarge { got, max } => {
+                write!(f, "proof node size {got} exceeds maximum {max}")
+            }
+            Self::TooManyProofNodes { got, max } => {
+                write!(f, "proof node count {got} exceeds maximum {max}")
             }
             Self::Rlp(error) => fmt::Display::fmt(error, f),
         }
