@@ -38,7 +38,7 @@ where
                     got: None,
                     expected: expected_value.map(Bytes::from),
                     got_private: false,
-                    expected_private: true,
+                    expected_private: expected_is_private,
                 })
             }
         } else {
@@ -793,6 +793,23 @@ mod tests {
             proof.clone(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn empty_root_value_mismatch_uses_expected_private() {
+        let key = Nibbles::unpack(B256::repeat_byte(42));
+        let proof = vec![Bytes::from([EMPTY_STRING_CODE])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, Some(vec![0x01]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ValueMismatch {
+                path: key,
+                got: None,
+                expected: Some(Bytes::from(vec![0x01])),
+                got_private: false,
+                expected_private: false,
+            })
+        );
     }
 
     #[test]
