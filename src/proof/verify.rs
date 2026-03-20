@@ -823,23 +823,11 @@ mod tests {
         // exclusion proof when root == EMPTY_ROOT_HASH and expected_value == None.
         // The trailing junk bytes should cause verification to fail.
         let key = Nibbles::unpack(B256::repeat_byte(42));
-        let proof_with_junk = vec![
-            Bytes::from([EMPTY_STRING_CODE]),
-            Bytes::from(vec![0xDE, 0xAD]),
-        ];
-        let result = verify_proof(
-            EMPTY_ROOT_HASH,
-            key,
-            None,
-            false,
-            proof_with_junk.iter(),
-        );
+        let proof_with_junk = vec![Bytes::from([EMPTY_STRING_CODE]), Bytes::from(vec![0xDE, 0xAD])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, None, false, proof_with_junk.iter());
         // After the fix, this should be Err (trailing proof nodes).
         // Before the fix, this incorrectly returns Ok(()).
-        assert!(
-            result.is_err(),
-            "proof with trailing nodes after empty node should be rejected"
-        );
+        assert!(result.is_err(), "proof with trailing nodes after empty node should be rejected");
     }
 
     #[test]
