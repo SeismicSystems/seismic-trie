@@ -11,6 +11,18 @@ use alloy_rlp::{Decodable, EMPTY_STRING_CODE};
 use core::ops::Deref;
 use nybbles::Nibbles;
 
+/// Maximum allowed size (in bytes) of a single proof node.
+///
+/// A fully populated branch node has 17 children x 33 bytes each, approximately 561 bytes of
+/// payload, plus RLP overhead. We use 1024 bytes as a safe upper bound.
+pub const MAX_PROOF_NODE_SIZE: usize = 1024;
+
+/// Maximum allowed number of proof nodes.
+///
+/// A valid Merkle-Patricia proof path is bounded by the key length. For Keccak256 keys,
+/// that is 64 nibbles, so at most 65 nodes (including the root).
+pub const MAX_PROOF_NODES: usize = 65;
+
 /// Verify the proof for given key value pair against the provided state root.
 ///
 /// The expected node value can be either [Some] if it's expected to be present
@@ -25,6 +37,16 @@ pub fn verify_proof<'a, I>(
 where
     I: IntoIterator<Item = &'a Bytes>,
 {
+    let proof: Vec<&'a Bytes> = proof.into_iter().collect();
+
+    // Enforce maximum proof node count.
+    if proof.len() > MAX_PROOF_NODES {
+        return Err(ProofVerificationError::TooManyProofNodes {
+            got: proof.len(),
+            max: MAX_PROOF_NODES,
+        });
+    }
+
     let mut proof = proof.into_iter().peekable();
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
@@ -55,6 +77,13 @@ where
     let mut last_decoded_node = Some(NodeDecodingResult::Node(RlpNode::word_rlp(&root)));
     let mut last_decoded_node_is_private = false;
     for node in proof {
+        // Enforce maximum proof node size.
+        if node.len() > MAX_PROOF_NODE_SIZE {
+            return Err(ProofVerificationError::ProofNodeTooLarge {
+                got: node.len(),
+                max: MAX_PROOF_NODE_SIZE,
+            });
+        }
         // Check if the node that we just decoded (or root node, if we just started) matches
         // the expected node from the proof.
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
@@ -909,5 +938,66 @@ mod tests {
                 prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
             }
         });
+    }
+
+    #[test]
+    fn reject_oversized_proof_node() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof node that exceeds MAX_PROOF_NODE_SIZE.
+        let oversized_node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE + 1]);
+        let proof = vec![oversized_node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE + 1,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn reject_too_many_proof_nodes() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof with more nodes than MAX_PROOF_NODES.
+        // The nodes don't need to be valid RLP because the count check
+        // happens before decoding.
+        let dummy_node = Bytes::from(vec![0xc0]); // minimal RLP empty list
+        let proof: Vec<Bytes> = (0..MAX_PROOF_NODES + 1).map(|_| dummy_node.clone()).collect();
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::TooManyProofNodes {
+                got: MAX_PROOF_NODES + 1,
+                max: MAX_PROOF_NODES,
+            })
+        );
+    }
+
+    #[test]
+    fn accept_proof_at_max_node_size() {
+        // A node exactly at MAX_PROOF_NODE_SIZE should NOT be rejected by the size check.
+        // It will fail for other reasons (invalid RLP, root mismatch, etc.) but not size.
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        let node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE]);
+        let proof = vec![node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        // Should not be ProofNodeTooLarge - it may fail for other reasons
+        assert_ne!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
     }
 }
