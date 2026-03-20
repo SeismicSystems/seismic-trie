@@ -156,7 +156,9 @@ fn process_trie_node(
     last_decoded_node_is_private: &mut bool,
 ) -> Result<Option<NodeDecodingResult>, ProofVerificationError> {
     let node = match node {
-        TrieNode::Branch(branch) => process_branch(branch, walked_path, key)?,
+        TrieNode::Branch(branch) => {
+            process_branch(branch, walked_path, key, last_decoded_node_is_private)?
+        }
         TrieNode::Extension(extension) => {
             walked_path.extend(&extension.key);
             if extension.child.is_hash() {
@@ -185,6 +187,7 @@ fn process_branch(
     mut branch: BranchNode,
     walked_path: &mut Nibbles,
     key: &Nibbles,
+    last_decoded_node_is_private: &mut bool,
 ) -> Result<Option<NodeDecodingResult>, ProofVerificationError> {
     if let Some(next) = key.get(walked_path.len()) {
         let mut stack_ptr = branch.as_ref().first_child_index();
@@ -204,7 +207,12 @@ fn process_branch(
                                 // encoded, leaf children, as anything else overflows this branch
                                 // node, making it impossible to be encoded in-place in the first
                                 // place.
-                                return process_branch(child_branch, walked_path, key);
+                                return process_branch(
+                                    child_branch,
+                                    walked_path,
+                                    key,
+                                    last_decoded_node_is_private,
+                                );
                             }
                             TrieNode::Extension(child_extension) => {
                                 walked_path.extend(&child_extension.key);
@@ -222,6 +230,7 @@ fn process_branch(
                                             extension_child_branch,
                                             walked_path,
                                             key,
+                                            last_decoded_node_is_private,
                                         );
                                     }
                                     node @ (TrieNode::EmptyRoot
@@ -235,6 +244,7 @@ fn process_branch(
                             }
                             TrieNode::Leaf(child_leaf) => {
                                 walked_path.extend(&child_leaf.key);
+                                *last_decoded_node_is_private = child_leaf.is_private;
                                 return Ok(Some(NodeDecodingResult::Value(child_leaf.value)));
                             }
                             TrieNode::EmptyRoot => {
@@ -889,6 +899,125 @@ mod tests {
         // After the fix, this should be Err (trailing proof nodes).
         // Before the fix, this incorrectly returns Ok(()).
         assert!(result.is_err(), "proof with trailing nodes after empty node should be rejected");
+    }
+
+    #[test]
+    fn private_inplace_leaf_proof_verification() {
+        // Same trie structure as proof_verification_with_node_encoded_in_place,
+        // but the in-place leaf at nibble 0x2 is marked private.
+        // This tests that process_branch correctly updates the privacy flag
+        // for in-place encoded leaves.
+        //
+        // root (branch)
+        //  ├─ 0x2 : leaf (key suffix = [0xa], value=0x64, private=true)   <-- target
+        //  ├─ 0x3 : branch (in-place) with leaves [0xa] and [0xb], public
+        //  └─ 0x4 : extension [0x1] -> branch (in-place) with leaves [0xa] and [0xb], public
+
+        let mut buffer = vec![];
+        let value = vec![0x64];
+
+        // Child at nibble 0x2: a private in-place leaf.
+        let child_leaf =
+            TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), true));
+
+        // Child at nibble 0x3: an in-place branch with two public leaves.
+        let child_branch = TrieNode::Branch(BranchNode::new(
+            vec![
+                {
+                    buffer.clear();
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xa]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xb]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
+                },
+            ],
+            TrieMask::new(0b0000000000001100_u16),
+        ));
+
+        // Child at nibble 0x4: extension [0x1] -> in-place branch with two public leaves.
+        let child_extension =
+            TrieNode::Extension(ExtensionNode::new(Nibbles::from_nibbles([0x1]), {
+                buffer.clear();
+                child_branch.rlp(&mut buffer)
+            }));
+
+        let root_branch = TrieNode::Branch(BranchNode::new(
+            vec![
+                {
+                    buffer.clear();
+                    child_leaf.rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    child_branch.rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    child_extension.rlp(&mut buffer)
+                },
+            ],
+            TrieMask::new(0b0000000000011100_u16),
+        ));
+
+        let mut root_encoded = vec![];
+        root_branch.encode(&mut root_encoded);
+
+        let root_hash = alloy_primitives::keccak256(&root_encoded);
+        let root_encoded = Bytes::from(root_encoded);
+        let proof = vec![&root_encoded];
+
+        // Private in-place leaf at path [0x2, 0xa] should verify as private.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x2, 0xa]),
+            Some(vec![0x64]),
+            true,
+            proof.clone(),
+        )
+        .unwrap();
+
+        // The same leaf should fail verification when claimed to be public.
+        assert!(
+            verify_proof(
+                root_hash,
+                Nibbles::from_nibbles([0x2, 0xa]),
+                Some(vec![0x64]),
+                false,
+                proof.clone(),
+            )
+            .is_err()
+        );
+
+        // Public in-place leaves at [0x3, 0x2, 0xa] should still verify as public.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x3, 0x2, 0xa]),
+            Some(vec![0x64]),
+            false,
+            proof.clone(),
+        )
+        .unwrap();
+
+        // Public in-place leaf via extension at [0x4, 0x1, 0x2, 0xa] should verify as public.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x4, 0x1, 0x2, 0xa]),
+            Some(vec![0x64]),
+            false,
+            proof.clone(),
+        )
+        .unwrap();
     }
 
     #[test]
