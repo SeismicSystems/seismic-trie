@@ -949,13 +949,7 @@ mod tests {
         let oversized_node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE + 1]);
         let proof = vec![oversized_node];
 
-        let result = verify_proof(
-            root,
-            key,
-            Some(vec![0x42]),
-            false,
-            proof.iter(),
-        );
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
         assert_eq!(
             result,
             Err(ProofVerificationError::ProofNodeTooLarge {
@@ -976,13 +970,7 @@ mod tests {
         let dummy_node = Bytes::from(vec![0xc0]); // minimal RLP empty list
         let proof: Vec<Bytes> = (0..MAX_PROOF_NODES + 1).map(|_| dummy_node.clone()).collect();
 
-        let result = verify_proof(
-            root,
-            key,
-            Some(vec![0x42]),
-            false,
-            proof.iter(),
-        );
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
         assert_eq!(
             result,
             Err(ProofVerificationError::TooManyProofNodes {
@@ -1002,13 +990,7 @@ mod tests {
         let node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE]);
         let proof = vec![node];
 
-        let result = verify_proof(
-            root,
-            key,
-            Some(vec![0x42]),
-            false,
-            proof.iter(),
-        );
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
         // Should not be ProofNodeTooLarge - it may fail for other reasons
         assert_ne!(
             result,
