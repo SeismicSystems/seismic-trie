@@ -11,6 +11,18 @@ use alloy_rlp::{Decodable, EMPTY_STRING_CODE};
 use core::ops::Deref;
 use nybbles::Nibbles;
 
+/// Maximum allowed size (in bytes) of a single proof node.
+///
+/// A fully populated branch node has 17 children x 33 bytes each, approximately 561 bytes of
+/// payload, plus RLP overhead. We use 1024 bytes as a safe upper bound.
+pub const MAX_PROOF_NODE_SIZE: usize = 1024;
+
+/// Maximum allowed number of proof nodes.
+///
+/// A valid Merkle-Patricia proof path is bounded by the key length. For Keccak256 keys,
+/// that is 64 nibbles, so at most 65 nodes (including the root).
+pub const MAX_PROOF_NODES: usize = 65;
+
 /// Verify the proof for given key value pair against the provided state root.
 ///
 /// The expected node value can be either [Some] if it's expected to be present
@@ -19,15 +31,31 @@ pub fn verify_proof<'a, I>(
     root: B256,
     key: Nibbles,
     expected_value: Option<Vec<u8>>,
+    expected_is_private: bool,
     proof: I,
 ) -> Result<(), ProofVerificationError>
 where
     I: IntoIterator<Item = &'a Bytes>,
 {
+    let proof: Vec<&'a Bytes> = proof.into_iter().collect();
+
+    // Enforce maximum proof node count.
+    if proof.len() > MAX_PROOF_NODES {
+        return Err(ProofVerificationError::TooManyProofNodes {
+            got: proof.len(),
+            max: MAX_PROOF_NODES,
+        });
+    }
+
     let mut proof = proof.into_iter().peekable();
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
     if proof.peek().is_none_or(|node| node.as_ref() == [EMPTY_STRING_CODE]) {
+        // Consume the first element (if any), then ensure no trailing nodes remain.
+        proof.next();
+        if proof.next().is_some() {
+            return Err(ProofVerificationError::TrailingProofNodes);
+        }
         return if root == EMPTY_ROOT_HASH {
             if expected_value.is_none() {
                 Ok(())
@@ -36,6 +64,8 @@ where
                     path: key,
                     got: None,
                     expected: expected_value.map(Bytes::from),
+                    got_private: false,
+                    expected_private: expected_is_private,
                 })
             }
         } else {
@@ -45,29 +75,53 @@ where
 
     let mut walked_path = Nibbles::new();
     let mut last_decoded_node = Some(NodeDecodingResult::Node(RlpNode::word_rlp(&root)));
+    let mut last_decoded_node_is_private = false;
     for node in proof {
+        // Enforce maximum proof node size.
+        if node.len() > MAX_PROOF_NODE_SIZE {
+            return Err(ProofVerificationError::ProofNodeTooLarge {
+                got: node.len(),
+                max: MAX_PROOF_NODE_SIZE,
+            });
+        }
         // Check if the node that we just decoded (or root node, if we just started) matches
         // the expected node from the proof.
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
             let got = Some(Bytes::copy_from_slice(node));
             let expected = last_decoded_node.as_deref().map(Bytes::copy_from_slice);
-            return Err(ProofVerificationError::ValueMismatch { path: walked_path, got, expected });
+            return Err(ProofVerificationError::ValueMismatch {
+                path: walked_path,
+                got,
+                expected,
+                got_private: last_decoded_node_is_private,
+                expected_private: false,
+            });
         }
 
         // Decode the next node from the proof.
-        last_decoded_node =
-            process_trie_node(TrieNode::decode(&mut &node[..])?, &mut walked_path, &key)?;
+        last_decoded_node = process_trie_node(
+            TrieNode::decode(&mut &node[..])?,
+            &mut walked_path,
+            &key,
+            &mut last_decoded_node_is_private,
+        )?;
     }
 
     // Last decoded node should have the key that we are looking for.
     last_decoded_node = last_decoded_node.filter(|_| walked_path == key);
-    if last_decoded_node.as_deref() == expected_value.as_deref() {
+    // For exclusion proofs (expected_value is None), we don't check the privacy flag
+    // because the privacy of an adjacent leaf where the proof terminates is irrelevant.
+    if last_decoded_node.as_deref() == expected_value.as_deref()
+        && (expected_value.is_none() || last_decoded_node_is_private == expected_is_private)
+    {
         Ok(())
     } else {
         Err(ProofVerificationError::ValueMismatch {
             path: key,
             got: last_decoded_node.as_deref().map(Bytes::copy_from_slice),
             expected: expected_value.map(Bytes::from),
+            got_private: last_decoded_node_is_private,
+            expected_private: expected_is_private,
         })
     }
 }
@@ -101,19 +155,28 @@ fn process_trie_node(
     node: TrieNode,
     walked_path: &mut Nibbles,
     key: &Nibbles,
+    last_decoded_node_is_private: &mut bool,
 ) -> Result<Option<NodeDecodingResult>, ProofVerificationError> {
     let node = match node {
-        TrieNode::Branch(branch) => process_branch(branch, walked_path, key)?,
+        TrieNode::Branch(branch) => {
+            process_branch(branch, walked_path, key, last_decoded_node_is_private)?
+        }
         TrieNode::Extension(extension) => {
             walked_path.extend(&extension.key);
             if extension.child.is_hash() {
                 Some(NodeDecodingResult::Node(extension.child))
             } else {
-                process_trie_node(TrieNode::decode(&mut &extension.child[..])?, walked_path, key)?
+                process_trie_node(
+                    TrieNode::decode(&mut &extension.child[..])?,
+                    walked_path,
+                    key,
+                    last_decoded_node_is_private,
+                )?
             }
         }
         TrieNode::Leaf(leaf) => {
             walked_path.extend(&leaf.key);
+            *last_decoded_node_is_private = leaf.is_private;
             Some(NodeDecodingResult::Value(leaf.value))
         }
         TrieNode::EmptyRoot => return Err(ProofVerificationError::UnexpectedEmptyRoot),
@@ -126,6 +189,7 @@ fn process_branch(
     mut branch: BranchNode,
     walked_path: &mut Nibbles,
     key: &Nibbles,
+    last_decoded_node_is_private: &mut bool,
 ) -> Result<Option<NodeDecodingResult>, ProofVerificationError> {
     if let Some(next) = key.get(walked_path.len()) {
         let mut stack_ptr = branch.as_ref().first_child_index();
@@ -145,7 +209,12 @@ fn process_branch(
                                 // encoded, leaf children, as anything else overflows this branch
                                 // node, making it impossible to be encoded in-place in the first
                                 // place.
-                                return process_branch(child_branch, walked_path, key);
+                                return process_branch(
+                                    child_branch,
+                                    walked_path,
+                                    key,
+                                    last_decoded_node_is_private,
+                                );
                             }
                             TrieNode::Extension(child_extension) => {
                                 walked_path.extend(&child_extension.key);
@@ -163,17 +232,21 @@ fn process_branch(
                                             extension_child_branch,
                                             walked_path,
                                             key,
+                                            last_decoded_node_is_private,
                                         );
                                     }
                                     node @ (TrieNode::EmptyRoot
                                     | TrieNode::Extension(_)
                                     | TrieNode::Leaf(_)) => {
-                                        unreachable!("unexpected extension node child: {node:?}")
+                                        return Err(ProofVerificationError::UnexpectedNodeChild(
+                                            alloc::format!("{node:?}"),
+                                        ));
                                     }
                                 }
                             }
                             TrieNode::Leaf(child_leaf) => {
                                 walked_path.extend(&child_leaf.key);
+                                *last_decoded_node_is_private = child_leaf.is_private;
                                 return Ok(Some(NodeDecodingResult::Value(child_leaf.value)));
                             }
                             TrieNode::EmptyRoot => {
@@ -205,6 +278,7 @@ mod tests {
 
     #[test]
     fn empty_trie() {
+        let empty_is_private = false;
         let key = Nibbles::unpack(B256::repeat_byte(42));
         let mut hash_builder =
             HashBuilder::default().with_proof_retainer(<ProofRetainer>::default());
@@ -215,18 +289,26 @@ mod tests {
             ProofNodes::from_iter([(Nibbles::default(), Bytes::from([EMPTY_STRING_CODE]))])
         );
         assert_eq!(
-            verify_proof(root, key, None, proof.into_nodes_sorted().iter().map(|(_, node)| node)),
+            verify_proof(
+                root,
+                key,
+                None,
+                empty_is_private,
+                proof.into_nodes_sorted().iter().map(|(_, node)| node),
+            ),
             Ok(())
         );
 
         let mut dummy_proof = vec![];
         BranchNode::default().encode(&mut dummy_proof);
         assert_eq!(
-            verify_proof(root, key, None, [&Bytes::from(dummy_proof.clone())]),
+            verify_proof(root, key, None, empty_is_private, [&Bytes::from(dummy_proof.clone())]),
             Err(ProofVerificationError::ValueMismatch {
                 path: Nibbles::default(),
                 got: Some(Bytes::from(dummy_proof)),
-                expected: Some(Bytes::from(RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec()))
+                expected: Some(Bytes::from(RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec())),
+                got_private: false,
+                expected_private: empty_is_private,
             })
         );
     }
@@ -251,45 +333,55 @@ mod tests {
         let second_key = Nibbles::unpack(hex!("a77d3970"));
         let second_value = hex!("0x312e32").to_vec();
 
-        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), &proof), Ok(()));
+        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), false, &proof), Ok(()));
         assert_eq!(
-            verify_proof(root, first_key, None, &proof),
+            verify_proof(root, first_key, None, false, &proof),
             Err(ProofVerificationError::ValueMismatch {
                 path: first_key,
                 got: Some(first_value.into()),
                 expected: None,
+                got_private: false,
+                expected_private: false,
             })
         );
 
-        assert_eq!(verify_proof(root, second_key, Some(second_value.clone()), &proof), Ok(()));
         assert_eq!(
-            verify_proof(root, second_key, None, &proof),
+            verify_proof(root, second_key, Some(second_value.clone()), false, &proof),
+            Ok(())
+        );
+        assert_eq!(
+            verify_proof(root, second_key, None, false, &proof),
             Err(ProofVerificationError::ValueMismatch {
                 path: second_key,
                 got: Some(second_value.into()),
                 expected: None,
+                got_private: false,
+                expected_private: false,
             })
         );
     }
 
     #[test]
     fn single_leaf_trie_proof_verification() {
+        let is_private = false; // basic test with no private leaf
         let target = Nibbles::unpack(B256::with_last_byte(0x2));
         let target_value = B256::with_last_byte(0x2);
         let non_existent_target = Nibbles::unpack(B256::with_last_byte(0x3));
 
         let retainer = ProofRetainer::from_iter([target, non_existent_target]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
-        hash_builder.add_leaf(target, &target_value[..]);
+        hash_builder.add_leaf(target, &target_value[..], is_private);
         let root = hash_builder.root();
         assert_eq!(root, triehash_trie_root([(target.pack(), target.pack())]));
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
+        println!("{:?}", proof);
         assert_eq!(
             verify_proof(
                 root,
                 target,
                 Some(target_value.to_vec()),
+                is_private,
                 proof.iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -297,7 +389,79 @@ mod tests {
     }
 
     #[test]
+    fn private_leaf_trie_proof_verification() {
+        // Create two leaves with different keys and values
+        let first_key = Nibbles::unpack(B256::with_last_byte(0x1));
+        let first_value = B256::with_last_byte(0x1);
+        let second_key = Nibbles::unpack(B256::with_last_byte(0x2));
+        let second_value = B256::with_last_byte(0x2);
+
+        // Create a retainer for both keys
+        let retainer = ProofRetainer::from_iter([first_key.clone(), second_key.clone()]);
+        let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+
+        // Add both leaves
+        hash_builder.add_leaf(first_key.clone(), &first_value[..], false);
+        hash_builder.add_leaf(second_key.clone(), &second_value[..], true);
+
+        let root = hash_builder.root();
+        let proof = hash_builder.take_proof_nodes();
+
+        // Get proof nodes for first leaf
+        let first_proof = proof.matching_nodes_sorted(&first_key);
+        // Verify first leaf exists
+        assert_eq!(
+            verify_proof(
+                root,
+                first_key.clone(),
+                Some(first_value.to_vec()),
+                false,
+                first_proof.iter().map(|(_, node)| node)
+            ),
+            Ok(())
+        );
+        // Verify private version does not exist
+        assert!(
+            verify_proof(
+                root,
+                first_key.clone(),
+                Some(first_value.to_vec()),
+                true,
+                first_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
+
+        // Get proof nodes for second leaf
+        let second_proof = proof.matching_nodes_sorted(&second_key);
+
+        // Verify second leaf exists
+        assert_eq!(
+            verify_proof(
+                root,
+                second_key.clone(),
+                Some(second_value.to_vec()),
+                true,
+                second_proof.iter().map(|(_, node)| node)
+            ),
+            Ok(())
+        );
+        // verify public version does not exist
+        assert!(
+            verify_proof(
+                root,
+                second_key.clone(),
+                Some(second_value.to_vec()),
+                false,
+                second_proof.iter().map(|(_, node)| node)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn non_existent_proof_verification() {
+        let is_priavte = false;
         let range = 0..=0xf;
         let target = Nibbles::unpack(B256::with_last_byte(0xff));
 
@@ -305,7 +469,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::with_last_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -314,11 +478,15 @@ mod tests {
         );
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
-        assert_eq!(verify_proof(root, target, None, proof.iter().map(|(_, node)| node)), Ok(()));
+        assert_eq!(
+            verify_proof(root, target, None, is_priavte, proof.iter().map(|(_, node)| node)),
+            Ok(())
+        );
     }
 
     #[test]
     fn proof_verification_with_divergent_node() {
+        let is_private = false;
         let existing_keys = [
             hex!("0000000000000000000000000000000000000000000000000000000000000000"),
             hex!("3a00000000000000000000000000000000000000000000000000000000000000"),
@@ -335,7 +503,7 @@ mod tests {
         let retainer = ProofRetainer::from_iter([target]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in &existing_keys {
-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
+            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -353,6 +521,7 @@ mod tests {
                 root,
                 target,
                 None,
+                is_private,
                 proof.into_nodes_sorted().iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -361,9 +530,9 @@ mod tests {
         let retainer = ProofRetainer::from_iter([target]);
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in &existing_keys {
-            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..]);
+            hash_builder.add_leaf(Nibbles::unpack(B256::from_slice(key)), &value[..], false);
         }
-        hash_builder.add_leaf(target, &value[..]);
+        hash_builder.add_leaf(target, &value[..], false);
         let root = hash_builder.root();
         assert_eq!(
             root,
@@ -387,6 +556,7 @@ mod tests {
                 root,
                 target,
                 Some(value.to_vec()),
+                is_private,
                 proof.into_nodes_sorted().iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -395,6 +565,7 @@ mod tests {
 
     #[test]
     fn extension_root_trie_proof_verification() {
+        let is_private = false;
         let range = 0..=0xff;
         let target = Nibbles::unpack(B256::with_last_byte(0x42));
         let target_value = B256::with_last_byte(0x42);
@@ -403,7 +574,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::with_last_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -417,6 +588,7 @@ mod tests {
                 root,
                 target,
                 Some(target_value.to_vec()),
+                is_private,
                 proof.iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -425,6 +597,7 @@ mod tests {
 
     #[test]
     fn wide_trie_proof_verification() {
+        let is_private = false;
         let range = 0..=0xff;
         let target1 = Nibbles::unpack(B256::repeat_byte(0x42));
         let target1_value = B256::repeat_byte(0x42);
@@ -435,7 +608,7 @@ mod tests {
         let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
         for key in range.clone() {
             let hash = B256::repeat_byte(key);
-            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..]);
+            hash_builder.add_leaf(Nibbles::unpack(hash), &hash[..], false);
         }
         let root = hash_builder.root();
         assert_eq!(
@@ -450,6 +623,7 @@ mod tests {
                 root,
                 target1,
                 Some(target1_value.to_vec()),
+                is_private,
                 proof.matching_nodes_sorted(&target1).iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -460,6 +634,7 @@ mod tests {
                 root,
                 target2,
                 Some(target2_value.to_vec()),
+                is_private,
                 proof.matching_nodes_sorted(&target2).iter().map(|(_, node)| node)
             ),
             Ok(())
@@ -468,6 +643,7 @@ mod tests {
 
     #[test]
     fn proof_verification_with_node_encoded_in_place() {
+        let is_private = false;
         // Building a trie with a leaf, branch, and extension encoded in place:
         //
         // - node `2a`: 0x64
@@ -552,18 +728,23 @@ mod tests {
         let mut buffer = vec![];
 
         let value = vec![0x64];
-        let child_leaf = TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()));
+        let child_leaf =
+            TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), false));
 
         let child_branch = TrieNode::Branch(BranchNode::new(
             vec![
                 {
                     buffer.clear();
-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone()))
-                        .rlp(&mut buffer)
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xa]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
                 },
                 {
                     buffer.clear();
-                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value))
+                    TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xb]), value, false))
                         .rlp(&mut buffer)
                 },
             ],
@@ -612,14 +793,21 @@ mod tests {
         let proof = vec![&root_encoded];
 
         // Node `2a`: 0x64
-        verify_proof(root_hash, Nibbles::from_nibbles([0x2, 0xa]), Some(vec![0x64]), proof.clone())
-            .unwrap();
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x2, 0xa]),
+            Some(vec![0x64]),
+            is_private,
+            proof.clone(),
+        )
+        .unwrap();
 
         // Node `32a`: 0x64
         verify_proof(
             root_hash,
             Nibbles::from_nibbles([0x3, 0x2, 0xa]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -629,6 +817,7 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x3, 0x3, 0xb]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -638,6 +827,7 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x4, 0x1, 0x2, 0xa]),
             Some(vec![0x64]),
+            is_private,
             proof.clone(),
         )
         .unwrap();
@@ -647,6 +837,186 @@ mod tests {
             root_hash,
             Nibbles::from_nibbles([0x4, 0x1, 0x3, 0xb]),
             Some(vec![0x64]),
+            is_private,
+            proof.clone(),
+        )
+        .unwrap();
+    }
+
+    /// Regression test for audit finding: malicious proof with an inline extension node
+    /// whose child is a leaf (not a branch) should return an error instead of panicking.
+    #[test]
+    fn malicious_proof_unexpected_extension_child_returns_error() {
+        let leaf = LeafNode::new(Nibbles::from_nibbles([0x2]), vec![0x01], false);
+        let mut leaf_rlp = Vec::new();
+        let leaf_node = leaf.as_ref().rlp(&mut leaf_rlp);
+
+        let extension = ExtensionNode::new(Nibbles::from_nibbles([0x1]), leaf_node);
+        let mut extension_rlp = Vec::new();
+        let extension_node = extension.as_ref().rlp(&mut extension_rlp);
+        assert!(extension_rlp.len() < 32, "extension node should be inline");
+
+        let other_child = RlpNode::word_rlp(&B256::repeat_byte(0x11));
+        let state_mask = TrieMask::from_nibble(0) | TrieMask::from_nibble(1);
+        let branch = BranchNode::new(vec![extension_node, other_child], state_mask);
+
+        let mut branch_rlp = Vec::new();
+        branch.as_ref().rlp(&mut branch_rlp);
+        assert!(branch_rlp.len() >= 32, "branch node should be hashed at root");
+
+        let root = alloy_primitives::keccak256(&branch_rlp);
+        let proof = vec![Bytes::from(branch_rlp)];
+        let key = Nibbles::from_nibbles([0x0]);
+
+        // Before the fix, this would panic with `unreachable!` instead of returning an error.
+        let result = verify_proof(root, key, None, false, proof.iter());
+        assert!(result.is_err(), "should return error, not panic");
+    }
+
+    #[test]
+    fn empty_root_value_mismatch_uses_expected_private() {
+        let key = Nibbles::unpack(B256::repeat_byte(42));
+        let proof = vec![Bytes::from([EMPTY_STRING_CODE])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, Some(vec![0x01]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ValueMismatch {
+                path: key,
+                got: None,
+                expected: Some(Bytes::from(vec![0x01])),
+                got_private: false,
+                expected_private: false,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_proof_with_trailing_nodes_is_rejected() {
+        // Demonstrates the bug: a proof like [EMPTY, junk...] is accepted as a valid
+        // exclusion proof when root == EMPTY_ROOT_HASH and expected_value == None.
+        // The trailing junk bytes should cause verification to fail.
+        let key = Nibbles::unpack(B256::repeat_byte(42));
+        let proof_with_junk = vec![Bytes::from([EMPTY_STRING_CODE]), Bytes::from(vec![0xDE, 0xAD])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, None, false, proof_with_junk.iter());
+        // After the fix, this should be Err (trailing proof nodes).
+        // Before the fix, this incorrectly returns Ok(()).
+        assert!(result.is_err(), "proof with trailing nodes after empty node should be rejected");
+    }
+
+    #[test]
+    fn private_inplace_leaf_proof_verification() {
+        // Same trie structure as proof_verification_with_node_encoded_in_place,
+        // but the in-place leaf at nibble 0x2 is marked private.
+        // This tests that process_branch correctly updates the privacy flag
+        // for in-place encoded leaves.
+        //
+        // root (branch)
+        //  ├─ 0x2 : leaf (key suffix = [0xa], value=0x64, private=true)   <-- target
+        //  ├─ 0x3 : branch (in-place) with leaves [0xa] and [0xb], public
+        //  └─ 0x4 : extension [0x1] -> branch (in-place) with leaves [0xa] and [0xb], public
+
+        let mut buffer = vec![];
+        let value = vec![0x64];
+
+        // Child at nibble 0x2: a private in-place leaf.
+        let child_leaf =
+            TrieNode::Leaf(LeafNode::new(Nibbles::from_nibbles([0xa]), value.clone(), true));
+
+        // Child at nibble 0x3: an in-place branch with two public leaves.
+        let child_branch = TrieNode::Branch(BranchNode::new(
+            vec![
+                {
+                    buffer.clear();
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xa]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    TrieNode::Leaf(LeafNode::new(
+                        Nibbles::from_nibbles([0xb]),
+                        value.clone(),
+                        false,
+                    ))
+                    .rlp(&mut buffer)
+                },
+            ],
+            TrieMask::new(0b0000000000001100_u16),
+        ));
+
+        // Child at nibble 0x4: extension [0x1] -> in-place branch with two public leaves.
+        let child_extension =
+            TrieNode::Extension(ExtensionNode::new(Nibbles::from_nibbles([0x1]), {
+                buffer.clear();
+                child_branch.rlp(&mut buffer)
+            }));
+
+        let root_branch = TrieNode::Branch(BranchNode::new(
+            vec![
+                {
+                    buffer.clear();
+                    child_leaf.rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    child_branch.rlp(&mut buffer)
+                },
+                {
+                    buffer.clear();
+                    child_extension.rlp(&mut buffer)
+                },
+            ],
+            TrieMask::new(0b0000000000011100_u16),
+        ));
+
+        let mut root_encoded = vec![];
+        root_branch.encode(&mut root_encoded);
+
+        let root_hash = alloy_primitives::keccak256(&root_encoded);
+        let root_encoded = Bytes::from(root_encoded);
+        let proof = vec![&root_encoded];
+
+        // Private in-place leaf at path [0x2, 0xa] should verify as private.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x2, 0xa]),
+            Some(vec![0x64]),
+            true,
+            proof.clone(),
+        )
+        .unwrap();
+
+        // The same leaf should fail verification when claimed to be public.
+        assert!(
+            verify_proof(
+                root_hash,
+                Nibbles::from_nibbles([0x2, 0xa]),
+                Some(vec![0x64]),
+                false,
+                proof.clone(),
+            )
+            .is_err()
+        );
+
+        // Public in-place leaves at [0x3, 0x2, 0xa] should still verify as public.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x3, 0x2, 0xa]),
+            Some(vec![0x64]),
+            false,
+            proof.clone(),
+        )
+        .unwrap();
+
+        // Public in-place leaf via extension at [0x4, 0x1, 0x2, 0xa] should verify as public.
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x4, 0x1, 0x2, 0xa]),
+            Some(vec![0x64]),
+            false,
             proof.clone(),
         )
         .unwrap();
@@ -667,7 +1037,7 @@ mod tests {
             let retainer = ProofRetainer::from_iter(hashed.clone().into_keys().map(Nibbles::unpack));
             let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
             for (key, value) in hashed.clone() {
-                hash_builder.add_leaf(Nibbles::unpack(key), &value);
+                hash_builder.add_leaf(Nibbles::unpack(key), &value, false);
             }
 
             let root = hash_builder.root();
@@ -676,8 +1046,209 @@ mod tests {
             let proofs = hash_builder.take_proof_nodes();
             for (key, value) in hashed {
                 let nibbles = Nibbles::unpack(key);
-                assert_eq!(verify_proof(root, nibbles, Some(value), proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
+                assert_eq!(verify_proof(root, nibbles, Some(value), false, proofs.matching_nodes_sorted(&nibbles).iter().map(|(_, node)| node)), Ok(()));
             }
         });
+    }
+
+    /// Unified property test for proof verification with privacy flags.
+    ///
+    /// Uses stratified sampling via `prop_oneof!` for value sizes:
+    /// - Small values: 0-0xFFFFFF (1-4 byte RLP)
+    /// - Large values: any U256
+    /// - Privacy flags: random true/false
+    ///
+    /// Note on in-place encoding: With B256 keys (64 nibbles), leaves are ~36+ bytes
+    /// due to path encoding, so in-place leaf encoding does not occur here. The unit
+    /// test `private_inplace_leaf_proof_verification` covers in-place scenarios using
+    /// handcrafted nodes that bypass HashBuilder/ProofRetainer. This is the correct
+    /// approach because:
+    /// 1. HashBuilder is designed for 64-nibble storage trie keys
+    /// 2. ProofRetainer has edge cases with small tries (potential separate bug)
+    /// 3. Verification code must handle any valid proof, including attacker-crafted ones with short
+    ///    keys - the unit test exercises this path directly
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn prop_mixed_privacy_proof_verification() {
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        // Values: mix of small (compact RLP) and large (full U256 range)
+        let value_strategy = prop_oneof![
+            // Small values: 1-4 byte RLP
+            Just(alloy_primitives::U256::ZERO),
+            (1u8..=127).prop_map(alloy_primitives::U256::from),
+            (128u32..=0xFFFFFF).prop_map(alloy_primitives::U256::from),
+            // Large values: full U256 range
+            any::<alloy_primitives::U256>(),
+        ];
+
+        proptest!(|(
+            entries in prop::collection::vec(
+                (any::<B256>(), value_strategy, any::<bool>()),
+                2..20
+            )
+        )| {
+            let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
+            for (key, value, is_private) in &entries {
+                state.insert(*key, (alloy_rlp::encode(value).to_vec(), *is_private));
+            }
+
+            let keys: Vec<Nibbles> = state.keys().map(|k| Nibbles::unpack(*k)).collect();
+            let retainer = ProofRetainer::from_iter(keys);
+            let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+            for (key, (value, is_private)) in &state {
+                hash_builder.add_leaf(Nibbles::unpack(*key), value, *is_private);
+            }
+            let root = hash_builder.root();
+            let proofs = hash_builder.take_proof_nodes();
+
+            for (key, (value, is_private)) in &state {
+                let nibbles = Nibbles::unpack(*key);
+                let proof_nodes = proofs.matching_nodes_sorted(&nibbles);
+
+                // Correct privacy flag should verify
+                let correct = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    *is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(correct.is_ok(), "Correct privacy flag should verify: {:?}", correct);
+
+                // Wrong privacy flag must fail
+                let wrong = verify_proof(
+                    root,
+                    nibbles,
+                    Some(value.clone()),
+                    !is_private,
+                    proof_nodes.iter().map(|(_, node)| node),
+                );
+                prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
+            }
+        });
+    }
+
+    #[test]
+    fn reject_oversized_proof_node() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof node that exceeds MAX_PROOF_NODE_SIZE.
+        let oversized_node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE + 1]);
+        let proof = vec![oversized_node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE + 1,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn reject_too_many_proof_nodes() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof with more nodes than MAX_PROOF_NODES.
+        // The nodes don't need to be valid RLP because the count check
+        // happens before decoding.
+        let dummy_node = Bytes::from(vec![0xc0]); // minimal RLP empty list
+        let proof: Vec<Bytes> = (0..MAX_PROOF_NODES + 1).map(|_| dummy_node.clone()).collect();
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::TooManyProofNodes {
+                got: MAX_PROOF_NODES + 1,
+                max: MAX_PROOF_NODES,
+            })
+        );
+    }
+
+    #[test]
+    fn accept_proof_at_max_node_size() {
+        // A node exactly at MAX_PROOF_NODE_SIZE should NOT be rejected by the size check.
+        // It will fail for other reasons (invalid RLP, root mismatch, etc.) but not size.
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        let node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE]);
+        let proof = vec![node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        // Should not be ProofNodeTooLarge - it may fail for other reasons
+        assert_ne!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn exclusion_proof_near_private_leaf_should_verify() {
+        // Regression test: exclusion proofs should not check the privacy flag of
+        // adjacent leaves where the proof terminates.
+        //
+        // Trie only contains 2 leaves:
+        //
+        // root
+        //  |
+        //  +-- 0x00...10 (public leaf)
+        //  |
+        //  +-- 0x00...20 (private leaf)
+        //
+        // We create 2 exclusion proofs for targets that diverge at the last nibble:
+        // - 0x00...11 should terminate at 0x00...10 (public leaf) and verify.
+        // - 0x00...21 should terminate at 0x00...20 (private leaf) and should also verify.
+        let public_key = Nibbles::unpack(B256::with_last_byte(0x10));
+        let private_key = Nibbles::unpack(B256::with_last_byte(0x20));
+        let public_value = B256::with_last_byte(0x10);
+        let private_value = B256::with_last_byte(0x20);
+        let target_near_public = Nibbles::unpack(B256::with_last_byte(0x11));
+        let target_near_private = Nibbles::unpack(B256::with_last_byte(0x21));
+
+        let retainer = ProofRetainer::from_iter([target_near_public, target_near_private]);
+        let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+        hash_builder.add_leaf(public_key, &public_value[..], false);
+        hash_builder.add_leaf(private_key, &private_value[..], true);
+
+        let root = hash_builder.root();
+        let proofs = hash_builder.take_proof_nodes();
+
+        // Exclusion proof near public leaf should verify
+        let public_proof = proofs.matching_nodes_sorted(&target_near_public);
+        let public_result = verify_proof(
+            root,
+            target_near_public,
+            None,
+            false,
+            public_proof.iter().map(|(_, node)| node),
+        );
+        assert!(
+            public_result.is_ok(),
+            "expected exclusion near public leaf to verify, got: {public_result:?}"
+        );
+
+        // Exclusion proof near private leaf should also verify (this was the bug)
+        let private_proof = proofs.matching_nodes_sorted(&target_near_private);
+        let private_result = verify_proof(
+            root,
+            target_near_private,
+            None,
+            false,
+            private_proof.iter().map(|(_, node)| node),
+        );
+        assert!(
+            private_result.is_ok(),
+            "expected exclusion near private leaf to verify, got: {private_result:?}"
+        );
     }
 }

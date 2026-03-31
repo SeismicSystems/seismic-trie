@@ -48,6 +48,7 @@ strip = "none"
 alloy-primitives = { version = "1.0", default-features = false, features = [
     "rlp",
     "map",
+    "seismic",
 ] }
 alloy-rlp = { version = "0.3.9", default-features = false, features = [
     "derive",
@@ -118,3 +119,6 @@ ethereum = []
 name = "bench"
 harness = false
 required-features = ["arbitrary"]
+
+[patch.crates-io]
+alloy-primitives = { git = "https://github.com/SeismicSystems/seismic-alloy-core.git", rev = "994f7b3fbc4582c2e06a00d03c7f3fe476b1b7c7" }

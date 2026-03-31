@@ -105,16 +105,23 @@ impl Decodable for TrieNode {
                 // extract the high order part of the nibble to then pick the odd nibble out
                 let key_flag = encoded_key[0] & 0xf0;
                 // Retrieve first byte. If it's [Some], then the nibbles are odd.
-                let first = match key_flag {
-                    ExtensionNode::ODD_FLAG | LeafNode::ODD_FLAG => Some(encoded_key[0] & 0x0f),
-                    ExtensionNode::EVEN_FLAG | LeafNode::EVEN_FLAG => None,
-                    _ => return Err(alloy_rlp::Error::Custom("node is not extension or leaf")),
+                let (first, is_private_opt) = match key_flag {
+                    LeafNode::PUB_EVEN_FLAG => (None, Some(false)),
+                    LeafNode::PRIV_EVEN_FLAG => (None, Some(true)),
+                    LeafNode::PUB_ODD_FLAG => (Some(encoded_key[0] & 0x0f), Some(false)),
+                    LeafNode::PRIV_ODD_FLAG => (Some(encoded_key[0] & 0x0f), Some(true)),
+                    ExtensionNode::ODD_FLAG => (Some(encoded_key[0] & 0x0f), None),
+                    ExtensionNode::EVEN_FLAG => (None, None),
+                    _ => {
+                        return Err(alloy_rlp::Error::Custom("node is not leaf or extension node"));
+                    }
                 };
 
                 let key = unpack_path_to_nibbles(first, &encoded_key[1..]);
-                let node = if key_flag == LeafNode::EVEN_FLAG || key_flag == LeafNode::ODD_FLAG {
+                let is_leaf = is_private_opt.is_some();
+                let node = if is_leaf {
                     let value = Bytes::decode(&mut items.remove(0))?.into();
-                    Self::Leaf(LeafNode::new(key, value))
+                    Self::Leaf(LeafNode::new(key, value, is_private_opt.unwrap()))
                 } else {
                     // We don't decode value because it is expected to be RLP encoded.
                     Self::Extension(ExtensionNode::new(
@@ -206,22 +213,22 @@ pub(crate) fn unpack_path_to_nibbles(first: Option<u8>, rest: &[u8]) -> Nibbles 
 ///
 /// // Extension node with an even path length:
 /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
-/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x00, 0xAB, 0xCD]);
+/// assert_eq!(encode_path_leaf(&nibbles, false, false)[..], [0x00, 0xAB, 0xCD]);
 ///
 /// // Extension node with an odd path length:
 /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
-/// assert_eq!(encode_path_leaf(&nibbles, false)[..], [0x1A, 0xBC]);
+/// assert_eq!(encode_path_leaf(&nibbles, false, false)[..], [0x1A, 0xBC]);
 ///
 /// // Leaf node with an even path length:
 /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C, 0x0D]);
-/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x20, 0xAB, 0xCD]);
+/// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x20, 0xAB, 0xCD]);
 ///
 /// // Leaf node with an odd path length:
 /// let nibbles = Nibbles::from_nibbles(&[0x0A, 0x0B, 0x0C]);
-/// assert_eq!(encode_path_leaf(&nibbles, true)[..], [0x3A, 0xBC]);
+/// assert_eq!(encode_path_leaf(&nibbles, true, false)[..], [0x3A, 0xBC]);
 /// ```
 #[inline]
-pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> {
+pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool, is_private: bool) -> SmallVec<[u8; 36]> {
     let mut nibbles = *nibbles;
     let encoded_len = nibbles.len() / 2 + 1;
     let odd_nibbles = nibbles.len() % 2 != 0;
@@ -229,11 +236,14 @@ pub fn encode_path_leaf(nibbles: &Nibbles, is_leaf: bool) -> SmallVec<[u8; 36]> 
     unsafe {
         nybbles::smallvec_with(encoded_len, |buf| {
             let (first, rest) = buf.split_first_mut().unwrap_unchecked();
-            first.write(match (is_leaf, odd_nibbles) {
-                (true, true) => LeafNode::ODD_FLAG | nibbles.get_unchecked(0),
-                (true, false) => LeafNode::EVEN_FLAG,
-                (false, true) => ExtensionNode::ODD_FLAG | nibbles.get_unchecked(0),
-                (false, false) => ExtensionNode::EVEN_FLAG,
+            first.write(match (is_private, is_leaf, odd_nibbles) {
+                (false, true, true) => LeafNode::PUB_ODD_FLAG | nibbles.get_unchecked(0),
+                (false, true, false) => LeafNode::PUB_EVEN_FLAG,
+                (false, false, true) => ExtensionNode::ODD_FLAG | nibbles.get_unchecked(0),
+                (false, false, false) => ExtensionNode::EVEN_FLAG,
+                (true, true, true) => LeafNode::PRIV_ODD_FLAG | nibbles.get_unchecked(0),
+                (true, true, false) => LeafNode::PRIV_EVEN_FLAG,
+                (true, false, _) => panic!("extension node cannot be private"),
             });
             if odd_nibbles {
                 nibbles = nibbles.slice(1..);
@@ -262,6 +272,7 @@ mod tests {
         let leaf = TrieNode::Leaf(LeafNode::new(
             Nibbles::from_nibbles_unchecked(hex!("0604060f")),
             alloy_rlp::encode(alloy_primitives::U256::ZERO),
+            false,
         ));
         let rlp = leaf.rlp(&mut vec![]);
         assert_eq!(rlp[..], hex!("c68320646f8180"));
@@ -274,10 +285,21 @@ mod tests {
         let leaf = TrieNode::Leaf(LeafNode::new(
             Nibbles::from_nibbles_unchecked(hex!("0604060f")),
             hex!("76657262").to_vec(),
+            false,
         ));
         let rlp = leaf.rlp(&mut vec![]);
         assert_eq!(rlp[..], hex!("c98320646f8476657262"));
         assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), leaf);
+
+        // private leaf
+        let priv_leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::from_nibbles_unchecked(hex!("0604060f")),
+            hex!("76657262").to_vec(),
+            true,
+        ));
+        let rlp = priv_leaf.rlp(&mut vec![]);
+        assert_eq!(rlp[..], hex!("c98360646f8476657262"));
+        assert_eq!(TrieNode::decode(&mut &rlp[..]).unwrap(), priv_leaf);
 
         // extension
         let mut child = vec![];
@@ -315,7 +337,7 @@ mod tests {
         let nibbles = Nibbles::from_nibbles(hex!(
             "05010406040a040203030f010805020b050c04070003070e0909070f010b0a0805020301070c0a0902040b0f000f0006040a04050f020b090701000a0a040b"
         ));
-        let path = encode_path_leaf(&nibbles, true);
+        let path = encode_path_leaf(&nibbles, true, false);
         let expected = hex!("351464a4233f1852b5c47037e997f1ba852317ca924bf0f064a45f2b9710aa4b");
         assert_eq!(path[..], expected);
     }
@@ -331,23 +353,69 @@ mod tests {
             prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
             let input_is_odd = input.len() % 2 == 1;
 
-            let compact_leaf = encode_path_leaf(&input, true);
+            let compact_leaf = encode_path_leaf(&input, true, false);
             let leaf_flag = compact_leaf[0];
             // Check flag
-            assert_ne!(leaf_flag & LeafNode::EVEN_FLAG, 0);
+            assert_ne!(leaf_flag & LeafNode::PUB_EVEN_FLAG, 0);
             assert_eq!(input_is_odd, (leaf_flag & ExtensionNode::ODD_FLAG) != 0);
             if input_is_odd {
                 assert_eq!(leaf_flag & 0x0f, input.first().unwrap());
             }
 
-            let compact_extension = encode_path_leaf(&input, false);
+            let compact_extension = encode_path_leaf(&input, false, false);
             let extension_flag = compact_extension[0];
             // Check first byte
-            assert_eq!(extension_flag & LeafNode::EVEN_FLAG, 0);
+            assert_eq!(extension_flag & LeafNode::PUB_EVEN_FLAG, 0);
             assert_eq!(input_is_odd, (extension_flag & ExtensionNode::ODD_FLAG) != 0);
             if input_is_odd {
                 assert_eq!(extension_flag & 0x0f, input.first().unwrap());
             }
+        });
+    }
+
+    /// Verifies private leaf hex-prefix encoding sets bit 6 (mask 0x40).
+
+    #[test]
+    #[cfg(feature = "arbitrary")]
+    #[cfg_attr(miri, ignore = "no proptest")]
+    fn encode_path_first_byte_private() {
+        use proptest::{collection::vec, prelude::*};
+
+        proptest::proptest!(|(input in vec(any::<u8>(), 0..32))| {
+            let input = Nibbles::unpack(&input);
+            prop_assert!(input.to_vec().iter().all(|&nibble| nibble <= 0xf));
+
+            let input_is_odd = input.len() % 2 == 1;
+            let compact_priv_leaf = encode_path_leaf(&input, true, true);
+            let priv_flag = compact_priv_leaf[0];
+
+            // Flag byte layout: `0bPLOx_xxxx` where P=private, L=leaf, O=odd parity.
+
+            // Bit 6 (private), bit 5 (leaf) must be set
+            prop_assert_ne!(priv_flag & 0x40, 0, "Private bit should be set");
+            prop_assert_ne!(priv_flag & 0x20, 0, "Leaf bit should be set");
+
+            // Bit 4 (odd) must match path parity
+            let has_odd_bit = (priv_flag & 0x10) != 0;
+            prop_assert_eq!(has_odd_bit, input_is_odd, "Odd bit should match parity");
+
+            // For odd paths, first nibble is packed into lower 4 bits
+            if input_is_odd {
+                prop_assert_eq!(
+                    priv_flag & 0x0f,
+                    input.first().unwrap(),
+                    "Lower nibble should contain first path nibble for odd paths"
+                );
+            }
+
+            // Private vs public must differ by exactly bit 6
+            let compact_pub_leaf = encode_path_leaf(&input, true, false);
+            let pub_flag = compact_pub_leaf[0];
+            prop_assert_eq!(
+                priv_flag ^ pub_flag,
+                0x40,
+                "Private and public flags should differ by exactly 0x40"
+            );
         });
     }
 }
