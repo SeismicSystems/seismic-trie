@@ -11,6 +11,18 @@ use alloy_rlp::{Decodable, EMPTY_STRING_CODE};
 use core::ops::Deref;
 use nybbles::Nibbles;
 
+/// Maximum allowed size (in bytes) of a single proof node.
+///
+/// A fully populated branch node has 17 children x 33 bytes each, approximately 561 bytes of
+/// payload, plus RLP overhead. We use 1024 bytes as a safe upper bound.
+pub const MAX_PROOF_NODE_SIZE: usize = 1024;
+
+/// Maximum allowed number of proof nodes.
+///
+/// A valid Merkle-Patricia proof path is bounded by the key length. For Keccak256 keys,
+/// that is 64 nibbles, so at most 65 nodes (including the root).
+pub const MAX_PROOF_NODES: usize = 65;
+
 /// Verify the proof for given key value pair against the provided state root.
 ///
 /// The expected node value can be either [Some] if it's expected to be present
@@ -25,10 +37,25 @@ pub fn verify_proof<'a, I>(
 where
     I: IntoIterator<Item = &'a Bytes>,
 {
+    let proof: Vec<&'a Bytes> = proof.into_iter().collect();
+
+    // Enforce maximum proof node count.
+    if proof.len() > MAX_PROOF_NODES {
+        return Err(ProofVerificationError::TooManyProofNodes {
+            got: proof.len(),
+            max: MAX_PROOF_NODES,
+        });
+    }
+
     let mut proof = proof.into_iter().peekable();
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
     if proof.peek().is_none_or(|node| node.as_ref() == [EMPTY_STRING_CODE]) {
+        // Consume the first element (if any), then ensure no trailing nodes remain.
+        proof.next();
+        if proof.next().is_some() {
+            return Err(ProofVerificationError::TrailingProofNodes);
+        }
         return if root == EMPTY_ROOT_HASH {
             if expected_value.is_none() {
                 Ok(())
@@ -50,6 +77,13 @@ where
     let mut last_decoded_node = Some(NodeDecodingResult::Node(RlpNode::word_rlp(&root)));
     let mut last_decoded_node_is_private = false;
     for node in proof {
+        // Enforce maximum proof node size.
+        if node.len() > MAX_PROOF_NODE_SIZE {
+            return Err(ProofVerificationError::ProofNodeTooLarge {
+                got: node.len(),
+                max: MAX_PROOF_NODE_SIZE,
+            });
+        }
         // Check if the node that we just decoded (or root node, if we just started) matches
         // the expected node from the proof.
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
@@ -204,7 +238,9 @@ fn process_branch(
                                     node @ (TrieNode::EmptyRoot
                                     | TrieNode::Extension(_)
                                     | TrieNode::Leaf(_)) => {
-                                        unreachable!("unexpected extension node child: {node:?}")
+                                        return Err(ProofVerificationError::UnexpectedNodeChild(
+                                            alloc::format!("{node:?}"),
+                                        ));
                                     }
                                 }
                             }
@@ -807,6 +843,66 @@ mod tests {
         .unwrap();
     }
 
+    /// Regression test for audit finding: malicious proof with an inline extension node
+    /// whose child is a leaf (not a branch) should return an error instead of panicking.
+    #[test]
+    fn malicious_proof_unexpected_extension_child_returns_error() {
+        let leaf = LeafNode::new(Nibbles::from_nibbles([0x2]), vec![0x01], false);
+        let mut leaf_rlp = Vec::new();
+        let leaf_node = leaf.as_ref().rlp(&mut leaf_rlp);
+
+        let extension = ExtensionNode::new(Nibbles::from_nibbles([0x1]), leaf_node);
+        let mut extension_rlp = Vec::new();
+        let extension_node = extension.as_ref().rlp(&mut extension_rlp);
+        assert!(extension_rlp.len() < 32, "extension node should be inline");
+
+        let other_child = RlpNode::word_rlp(&B256::repeat_byte(0x11));
+        let state_mask = TrieMask::from_nibble(0) | TrieMask::from_nibble(1);
+        let branch = BranchNode::new(vec![extension_node, other_child], state_mask);
+
+        let mut branch_rlp = Vec::new();
+        branch.as_ref().rlp(&mut branch_rlp);
+        assert!(branch_rlp.len() >= 32, "branch node should be hashed at root");
+
+        let root = alloy_primitives::keccak256(&branch_rlp);
+        let proof = vec![Bytes::from(branch_rlp)];
+        let key = Nibbles::from_nibbles([0x0]);
+
+        // Before the fix, this would panic with `unreachable!` instead of returning an error.
+        let result = verify_proof(root, key, None, false, proof.iter());
+        assert!(result.is_err(), "should return error, not panic");
+    }
+
+    #[test]
+    fn empty_root_value_mismatch_uses_expected_private() {
+        let key = Nibbles::unpack(B256::repeat_byte(42));
+        let proof = vec![Bytes::from([EMPTY_STRING_CODE])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, Some(vec![0x01]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ValueMismatch {
+                path: key,
+                got: None,
+                expected: Some(Bytes::from(vec![0x01])),
+                got_private: false,
+                expected_private: false,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_proof_with_trailing_nodes_is_rejected() {
+        // Demonstrates the bug: a proof like [EMPTY, junk...] is accepted as a valid
+        // exclusion proof when root == EMPTY_ROOT_HASH and expected_value == None.
+        // The trailing junk bytes should cause verification to fail.
+        let key = Nibbles::unpack(B256::repeat_byte(42));
+        let proof_with_junk = vec![Bytes::from([EMPTY_STRING_CODE]), Bytes::from(vec![0xDE, 0xAD])];
+        let result = verify_proof(EMPTY_ROOT_HASH, key, None, false, proof_with_junk.iter());
+        // After the fix, this should be Err (trailing proof nodes).
+        // Before the fix, this incorrectly returns Ok(()).
+        assert!(result.is_err(), "proof with trailing nodes after empty node should be rejected");
+    }
+
     #[test]
     fn private_inplace_leaf_proof_verification() {
         // Same trie structure as proof_verification_with_node_encoded_in_place,
@@ -927,23 +1023,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_root_value_mismatch_uses_expected_private() {
-        let key = Nibbles::unpack(B256::repeat_byte(42));
-        let proof = vec![Bytes::from([EMPTY_STRING_CODE])];
-        let result = verify_proof(EMPTY_ROOT_HASH, key, Some(vec![0x01]), false, proof.iter());
-        assert_eq!(
-            result,
-            Err(ProofVerificationError::ValueMismatch {
-                path: key,
-                got: None,
-                expected: Some(Bytes::from(vec![0x01])),
-                got_private: false,
-                expected_private: false,
-            })
-        );
-    }
-
-    #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
     fn arbitrary_proof_verification() {
@@ -1050,6 +1129,67 @@ mod tests {
                 prop_assert!(wrong.is_err(), "Wrong privacy flag must fail");
             }
         });
+    }
+
+    #[test]
+    fn reject_oversized_proof_node() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof node that exceeds MAX_PROOF_NODE_SIZE.
+        let oversized_node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE + 1]);
+        let proof = vec![oversized_node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE + 1,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn reject_too_many_proof_nodes() {
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        // Create a proof with more nodes than MAX_PROOF_NODES.
+        // The nodes don't need to be valid RLP because the count check
+        // happens before decoding.
+        let dummy_node = Bytes::from(vec![0xc0]); // minimal RLP empty list
+        let proof: Vec<Bytes> = (0..MAX_PROOF_NODES + 1).map(|_| dummy_node.clone()).collect();
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        assert_eq!(
+            result,
+            Err(ProofVerificationError::TooManyProofNodes {
+                got: MAX_PROOF_NODES + 1,
+                max: MAX_PROOF_NODES,
+            })
+        );
+    }
+
+    #[test]
+    fn accept_proof_at_max_node_size() {
+        // A node exactly at MAX_PROOF_NODE_SIZE should NOT be rejected by the size check.
+        // It will fail for other reasons (invalid RLP, root mismatch, etc.) but not size.
+        let key = Nibbles::unpack(B256::repeat_byte(0x42));
+        let root = B256::repeat_byte(0x01);
+
+        let node = Bytes::from(vec![0xaa; MAX_PROOF_NODE_SIZE]);
+        let proof = vec![node];
+
+        let result = verify_proof(root, key, Some(vec![0x42]), false, proof.iter());
+        // Should not be ProofNodeTooLarge - it may fail for other reasons
+        assert_ne!(
+            result,
+            Err(ProofVerificationError::ProofNodeTooLarge {
+                got: MAX_PROOF_NODE_SIZE,
+                max: MAX_PROOF_NODE_SIZE,
+            })
+        );
     }
 
     #[test]
