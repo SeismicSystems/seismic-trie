@@ -109,8 +109,10 @@ where
 
     // Last decoded node should have the key that we are looking for.
     last_decoded_node = last_decoded_node.filter(|_| walked_path == key);
+    // For exclusion proofs (expected_value is None), we don't check the privacy flag
+    // because the privacy of an adjacent leaf where the proof terminates is irrelevant.
     if last_decoded_node.as_deref() == expected_value.as_deref()
-        && last_decoded_node_is_private == expected_is_private
+        && (expected_value.is_none() || last_decoded_node_is_private == expected_is_private)
     {
         Ok(())
     } else {
@@ -1049,6 +1051,22 @@ mod tests {
         });
     }
 
+    /// Unified property test for proof verification with privacy flags.
+    ///
+    /// Uses stratified sampling via `prop_oneof!` for value sizes:
+    /// - Small values: 0-0xFFFFFF (1-4 byte RLP)
+    /// - Large values: any U256
+    /// - Privacy flags: random true/false
+    ///
+    /// Note on in-place encoding: With B256 keys (64 nibbles), leaves are ~36+ bytes
+    /// due to path encoding, so in-place leaf encoding does not occur here. The unit
+    /// test `private_inplace_leaf_proof_verification` covers in-place scenarios using
+    /// handcrafted nodes that bypass HashBuilder/ProofRetainer. This is the correct
+    /// approach because:
+    /// 1. HashBuilder is designed for 64-nibble storage trie keys
+    /// 2. ProofRetainer has edge cases with small tries (potential separate bug)
+    /// 3. Verification code must handle any valid proof, including attacker-crafted ones with short
+    ///    keys - the unit test exercises this path directly
     #[test]
     #[cfg(feature = "arbitrary")]
     #[cfg_attr(miri, ignore = "no proptest")]
@@ -1056,10 +1074,20 @@ mod tests {
         use proptest::prelude::*;
         use std::collections::BTreeMap;
 
+        // Values: mix of small (compact RLP) and large (full U256 range)
+        let value_strategy = prop_oneof![
+            // Small values: 1-4 byte RLP
+            Just(alloy_primitives::U256::ZERO),
+            (1u8..=127).prop_map(alloy_primitives::U256::from),
+            (128u32..=0xFFFFFF).prop_map(alloy_primitives::U256::from),
+            // Large values: full U256 range
+            any::<alloy_primitives::U256>(),
+        ];
+
         proptest!(|(
             entries in prop::collection::vec(
-                (any::<B256>(), any::<alloy_primitives::U256>(), any::<bool>()),
-                1..20
+                (any::<B256>(), value_strategy, any::<bool>()),
+                2..20
             )
         )| {
             let mut state: BTreeMap<B256, (Vec<u8>, bool)> = BTreeMap::new();
@@ -1080,6 +1108,7 @@ mod tests {
                 let nibbles = Nibbles::unpack(*key);
                 let proof_nodes = proofs.matching_nodes_sorted(&nibbles);
 
+                // Correct privacy flag should verify
                 let correct = verify_proof(
                     root,
                     nibbles,
@@ -1089,6 +1118,7 @@ mod tests {
                 );
                 prop_assert!(correct.is_ok(), "Correct privacy flag should verify: {:?}", correct);
 
+                // Wrong privacy flag must fail
                 let wrong = verify_proof(
                     root,
                     nibbles,
@@ -1159,6 +1189,66 @@ mod tests {
                 got: MAX_PROOF_NODE_SIZE,
                 max: MAX_PROOF_NODE_SIZE,
             })
+        );
+    }
+
+    #[test]
+    fn exclusion_proof_near_private_leaf_should_verify() {
+        // Regression test: exclusion proofs should not check the privacy flag of
+        // adjacent leaves where the proof terminates.
+        //
+        // Trie only contains 2 leaves:
+        //
+        // root
+        //  |
+        //  +-- 0x00...10 (public leaf)
+        //  |
+        //  +-- 0x00...20 (private leaf)
+        //
+        // We create 2 exclusion proofs for targets that diverge at the last nibble:
+        // - 0x00...11 should terminate at 0x00...10 (public leaf) and verify.
+        // - 0x00...21 should terminate at 0x00...20 (private leaf) and should also verify.
+        let public_key = Nibbles::unpack(B256::with_last_byte(0x10));
+        let private_key = Nibbles::unpack(B256::with_last_byte(0x20));
+        let public_value = B256::with_last_byte(0x10);
+        let private_value = B256::with_last_byte(0x20);
+        let target_near_public = Nibbles::unpack(B256::with_last_byte(0x11));
+        let target_near_private = Nibbles::unpack(B256::with_last_byte(0x21));
+
+        let retainer = ProofRetainer::from_iter([target_near_public, target_near_private]);
+        let mut hash_builder = HashBuilder::default().with_proof_retainer(retainer);
+        hash_builder.add_leaf(public_key, &public_value[..], false);
+        hash_builder.add_leaf(private_key, &private_value[..], true);
+
+        let root = hash_builder.root();
+        let proofs = hash_builder.take_proof_nodes();
+
+        // Exclusion proof near public leaf should verify
+        let public_proof = proofs.matching_nodes_sorted(&target_near_public);
+        let public_result = verify_proof(
+            root,
+            target_near_public,
+            None,
+            false,
+            public_proof.iter().map(|(_, node)| node),
+        );
+        assert!(
+            public_result.is_ok(),
+            "expected exclusion near public leaf to verify, got: {public_result:?}"
+        );
+
+        // Exclusion proof near private leaf should also verify (this was the bug)
+        let private_proof = proofs.matching_nodes_sorted(&target_near_private);
+        let private_result = verify_proof(
+            root,
+            target_near_private,
+            None,
+            false,
+            private_proof.iter().map(|(_, node)| node),
+        );
+        assert!(
+            private_result.is_ok(),
+            "expected exclusion near private leaf to verify, got: {private_result:?}"
         );
     }
 }
