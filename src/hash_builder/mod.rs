@@ -5,10 +5,10 @@ use super::{
     nodes::{BranchNodeRef, ExtensionNodeRef, LeafNodeRef},
     proof::{ProofNodes, ProofRetainer},
 };
-use crate::{HashMap, nodes::RlpNode, proof::AddedRemovedKeys};
+use crate::{HashMap, nodes::RlpNode, proof::AddedRemovedKeys, redact::RedactedValue};
 use alloc::vec::Vec;
 use alloy_primitives::{B256, keccak256};
-use core::cmp;
+use core::{cmp, fmt};
 use tracing::trace;
 
 mod value;
@@ -212,12 +212,14 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
     }
 
     fn log_key_value(&self, msg: &str) {
-        let is_private = self.is_private.unwrap_or(false);
-        let value_display =
-            if is_private { "<redacted>".to_string() } else { format!("{:?}", self.value) };
+        // Render lazily: `trace!` only formats its fields when the event is enabled, so the
+        // hex encoding stays off the hot path. Anything not explicitly marked public is
+        // redacted, so an unclassified value can never fall through as plaintext.
+        let value: &dyn fmt::Debug =
+            if self.is_private == Some(false) { &self.value } else { &RedactedValue };
         trace!(target: "trie::hash_builder",
             key = ?self.key,
-            value = %value_display,
+            ?value,
             is_private = ?self.is_private,
             "{msg}",
         );
@@ -495,9 +497,153 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
     }
 }
 
+/// Captures the fields of every `trace!` event on the current thread so tests can assert on
+/// what actually reaches a log sink.
+///
+/// Implemented directly against `tracing::Subscriber` to avoid pulling `tracing-subscriber`
+/// in as a dev-dependency.
+#[cfg(test)]
+mod capture {
+    use alloc::{format, string::String, vec::Vec};
+    use core::{
+        fmt::Debug,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use std::sync::{Arc, Mutex};
+    use tracing::{
+        Event, Metadata, Subscriber,
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
+    };
+
+    #[derive(Clone, Default)]
+    pub(super) struct CaptureSubscriber {
+        pub(super) events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CaptureSubscriber {
+        /// All captured events joined into a single haystack.
+        pub(super) fn dump(&self) -> String {
+            self.events.lock().unwrap().join("\n")
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldCollector(String);
+
+    impl Visit for FieldCollector {
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            self.0.push_str(&format!("{}={:?} ", field.name(), value));
+        }
+    }
+
+    impl Subscriber for CaptureSubscriber {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            static NEXT: AtomicUsize = AtomicUsize::new(1);
+            Id::from_u64(NEXT.fetch_add(1, Ordering::Relaxed) as u64)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut collector = FieldCollector::default();
+            event.record(&mut collector);
+            self.events.lock().unwrap().push(collector.0);
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{capture::CaptureSubscriber, *};
+
+    /// Regression test for the shielded-value log leak: `HashBuilder::log_key_value` used to
+    /// render `self.value` unconditionally, so setting a private leaf pushed its plaintext
+    /// into `trace!`.
+    #[test]
+    fn trace_hides_private_value() {
+        let secret = hex!("deadbeefcafebabe");
+        let subscriber = CaptureSubscriber::default();
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let mut hb = HashBuilder::default();
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0102")),
+                HashBuilderValueRef::Bytes(&secret),
+                Some(true),
+            );
+            // Fire the "old value" log too, now that the private value is the current one.
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0304")),
+                HashBuilderValueRef::Bytes(&hex!("00")),
+                Some(false),
+            );
+        });
+
+        let logged = subscriber.dump();
+        assert!(!logged.is_empty(), "no trace events captured");
+        assert!(!logged.contains("deadbeefcafebabe"), "private value leaked into trace: {logged}");
+        assert!(logged.contains("<redacted>"), "expected redaction marker: {logged}");
+    }
+
+    /// An unclassified value (`is_private == None`) must be treated as private, not public.
+    #[test]
+    fn trace_hides_unclassified_value() {
+        let unclassified = hex!("f00df00df00d");
+        let subscriber = CaptureSubscriber::default();
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let mut hb = HashBuilder::default();
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0102")),
+                HashBuilderValueRef::Bytes(&unclassified),
+                None,
+            );
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0304")),
+                HashBuilderValueRef::Bytes(&hex!("00")),
+                Some(false),
+            );
+        });
+
+        let logged = subscriber.dump();
+        assert!(!logged.contains("f00df00df00d"), "unclassified value leaked: {logged}");
+    }
+
+    /// Public values must keep rendering, otherwise the traces lose their debugging value.
+    #[test]
+    fn trace_still_shows_public_value() {
+        let public = hex!("0badc0de");
+        let subscriber = CaptureSubscriber::default();
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let mut hb = HashBuilder::default();
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0102")),
+                HashBuilderValueRef::Bytes(&public),
+                Some(false),
+            );
+            hb.set_key_value(
+                Nibbles::from_nibbles_unchecked(hex!("0304")),
+                HashBuilderValueRef::Bytes(&hex!("00")),
+                Some(false),
+            );
+        });
+
+        let logged = subscriber.dump();
+        assert!(logged.contains("0badc0de"), "public value should still render: {logged}");
+    }
+
     use crate::{nodes::LeafNode, triehash_trie_root};
     use alloc::collections::BTreeMap;
     use alloy_primitives::{U256, b256, hex};
