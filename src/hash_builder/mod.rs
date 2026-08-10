@@ -212,10 +212,13 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
     }
 
     fn log_key_value(&self, msg: &str) {
+        let is_private = self.is_private.unwrap_or(false);
+        let value_display =
+            if is_private { "<redacted>".to_string() } else { format!("{:?}", self.value) };
         trace!(target: "trie::hash_builder",
             key = ?self.key,
-            value = ?self.value,
-            is_private = self.is_private,
+            value = %value_display,
+            is_private = ?self.is_private,
             "{msg}",
         );
     }

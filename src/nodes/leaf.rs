@@ -26,9 +26,11 @@ pub struct LeafNode {
 
 impl fmt::Debug for LeafNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value_display =
+            if self.is_private { "<redacted>".to_string() } else { hex::encode(&self.value) };
         f.debug_struct("LeafNode")
             .field("key", &self.key)
-            .field("value", &hex::encode(&self.value))
+            .field("value", &value_display)
             .field("is_private", &self.is_private)
             .finish()
     }
@@ -110,9 +112,12 @@ pub struct LeafNodeRef<'a> {
 
 impl fmt::Debug for LeafNodeRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value_display =
+            if *self.is_private { "<redacted>".to_string() } else { hex::encode(self.value) };
         f.debug_struct("LeafNodeRef")
             .field("key", &self.key)
-            .field("value", &hex::encode(self.value))
+            .field("value", &value_display)
+            .field("is_private", self.is_private)
             .finish()
     }
 }
@@ -216,5 +221,37 @@ mod tests {
         assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), priv_leaf);
 
         assert_ne!(leaf.as_ref().rlp(&mut vec![]), priv_leaf.as_ref().rlp(&mut vec![]));
+    }
+
+    #[test]
+    fn leaf_node_debug_redacts_private_value() {
+        let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        let secret = b"super_secret_data".to_vec();
+
+        let priv_leaf = LeafNode::new(nibble.clone(), secret.clone(), true);
+        let debug_str = format!("{priv_leaf:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("super_secret_data"));
+
+        let pub_leaf = LeafNode::new(nibble, secret, false);
+        let pub_debug_str = format!("{pub_leaf:?}");
+        assert!(!pub_debug_str.contains("<redacted>"));
+    }
+
+    #[test]
+    fn leaf_node_ref_debug_redacts_private_value() {
+        let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        let secret = b"super_secret_data".to_vec();
+
+        let is_private = true;
+        let priv_leaf_ref = LeafNodeRef::new(&nibble, &secret, &is_private);
+        let debug_str = format!("{priv_leaf_ref:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("super_secret_data"));
+
+        let is_public = false;
+        let pub_leaf_ref = LeafNodeRef::new(&nibble, &secret, &is_public);
+        let pub_debug_str = format!("{pub_leaf_ref:?}");
+        assert!(!pub_debug_str.contains("<redacted>"));
     }
 }
