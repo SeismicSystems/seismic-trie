@@ -502,7 +502,7 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
 ///
 /// Implemented directly against `tracing::Subscriber` to avoid pulling `tracing-subscriber`
 /// in as a dev-dependency.
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod capture {
     use alloc::{format, string::String, vec::Vec};
     use core::{
@@ -563,9 +563,14 @@ mod capture {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Trace-output regression tests.
+///
+/// Gated on `std`: they install a `tracing` subscriber, and `tracing::subscriber::
+/// with_default` is only available when `tracing` is built with its `std` feature.
+#[cfg(all(test, feature = "std"))]
+mod trace_redaction_tests {
     use super::{capture::CaptureSubscriber, *};
+    use alloy_primitives::hex;
 
     /// Regression test for the shielded-value log leak: `HashBuilder::log_key_value` used to
     /// render `self.value` unconditionally, so setting a private leaf pushed its plaintext
@@ -643,6 +648,11 @@ mod tests {
         let logged = subscriber.dump();
         assert!(logged.contains("0badc0de"), "public value should still render: {logged}");
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     use crate::{nodes::LeafNode, triehash_trie_root};
     use alloc::collections::BTreeMap;
