@@ -1,5 +1,6 @@
 use super::{super::Nibbles, RlpNode, encode_path_leaf, unpack_path_to_nibbles};
-use alloy_primitives::{Bytes, hex};
+use crate::redact::MaybeRedacted;
+use alloy_primitives::Bytes;
 use alloy_rlp::{BufMut, Decodable, Encodable, Header, length_of_length};
 use core::fmt;
 
@@ -28,7 +29,7 @@ impl fmt::Debug for LeafNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LeafNode")
             .field("key", &self.key)
-            .field("value", &hex::encode(&self.value))
+            .field("value", &MaybeRedacted { value: &self.value, is_private: self.is_private })
             .field("is_private", &self.is_private)
             .finish()
     }
@@ -112,7 +113,8 @@ impl fmt::Debug for LeafNodeRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LeafNodeRef")
             .field("key", &self.key)
-            .field("value", &hex::encode(self.value))
+            .field("value", &MaybeRedacted { value: self.value, is_private: *self.is_private })
+            .field("is_private", self.is_private)
             .finish()
     }
 }
@@ -166,6 +168,7 @@ impl<'a> LeafNodeRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::hex;
 
     // From manual regression test
     #[test]
@@ -216,5 +219,37 @@ mod tests {
         assert_eq!(LeafNode::decode(&mut &rlp[..]).unwrap(), priv_leaf);
 
         assert_ne!(leaf.as_ref().rlp(&mut vec![]), priv_leaf.as_ref().rlp(&mut vec![]));
+    }
+
+    #[test]
+    fn leaf_node_debug_redacts_private_value() {
+        let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        let secret = b"super_secret_data".to_vec();
+
+        let priv_leaf = LeafNode::new(nibble, secret.clone(), true);
+        let debug_str = format!("{priv_leaf:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("super_secret_data"));
+
+        let pub_leaf = LeafNode::new(nibble, secret, false);
+        let pub_debug_str = format!("{pub_leaf:?}");
+        assert!(!pub_debug_str.contains("<redacted>"));
+    }
+
+    #[test]
+    fn leaf_node_ref_debug_redacts_private_value() {
+        let nibble = Nibbles::from_nibbles_unchecked(hex!("0604060f"));
+        let secret = b"super_secret_data".to_vec();
+
+        let is_private = true;
+        let priv_leaf_ref = LeafNodeRef::new(&nibble, &secret, &is_private);
+        let debug_str = format!("{priv_leaf_ref:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("super_secret_data"));
+
+        let is_public = false;
+        let pub_leaf_ref = LeafNodeRef::new(&nibble, &secret, &is_public);
+        let pub_debug_str = format!("{pub_leaf_ref:?}");
+        assert!(!pub_debug_str.contains("<redacted>"));
     }
 }

@@ -19,6 +19,8 @@
 #[allow(unused_imports)]
 extern crate alloc;
 
+mod redact;
+
 pub mod nodes;
 pub use nodes::BranchNodeCompact;
 
