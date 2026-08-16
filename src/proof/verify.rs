@@ -375,7 +375,6 @@ mod tests {
         assert_eq!(root, triehash_trie_root([(target.pack(), target.pack())]));
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
-        println!("{:?}", proof);
         assert_eq!(
             verify_proof(
                 root,
